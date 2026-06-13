@@ -21,6 +21,11 @@ inline constexpr float k_attacks_per_sec = 1.6f;
 inline constexpr float k_attack_damage = 60.0f;
 inline constexpr float k_windup_fraction = 0.3f;  // share of the attack cycle spent winding up
 
+inline constexpr float k_flash_range = 400.0f;
+inline constexpr float k_flash_cd = 300.0f;
+inline constexpr float k_ghost_cd = 210.0f;
+inline constexpr float k_ignite_cd = 180.0f;
+
 inline constexpr float k_projectile_speed = 1800.0f;
 inline constexpr float k_projectile_radius = 7.0f;
 inline constexpr float k_hit_distance = 6.0f;
@@ -30,6 +35,19 @@ inline constexpr float k_popup_rise = 70.0f;  // upward drift, units/sec
 
 inline constexpr float k_dummy_radius = 28.0f;
 inline constexpr float k_dummy_hp = 1000.0f;
+
+struct Cooldown {
+    float remaining = 0.0f;
+    float total = 0.0f;
+
+    bool ready() const { return remaining <= 0.0f; }
+    void trigger() { remaining = total; }
+    void tick(const float dt) {
+        if (remaining > 0.0f) {
+            remaining -= dt;
+        }
+    }
+};
 
 struct Champion {
     Vector2 pos{0.0f, 0.0f};
@@ -47,6 +65,10 @@ struct Champion {
 
     float atk_cooldown = 0.0f;  // time until the next attack is allowed
     float windup = 0.0f;        // >0 == mid-attack; damage point is when it reaches 0
+
+    Cooldown flash{0.0f, k_flash_cd};
+    Cooldown ghost{0.0f, k_ghost_cd};
+    Cooldown ignite{0.0f, k_ignite_cd};
 };
 
 struct Dummy {
@@ -77,6 +99,7 @@ struct World {
     std::vector<Dummy> dummies;
     std::vector<Projectile> projectiles;
     std::vector<FloatingText> popups;
+    bool cooldowns_enabled = true;  // practice toggle (false == abilities always ready)
     int next_id = 0;
 };
 
@@ -90,13 +113,22 @@ struct Commands {
     bool place_requested = false;
     Vector2 place_point{0.0f, 0.0f};
 
+    bool flash_requested = false;
+    Vector2 flash_point{0.0f, 0.0f};
+
+    bool toggle_cooldowns = false;
+
     // Order latches (move/attack) are re-issued each frame and cleared after the
     // substep loop. One-shots are consumed after each substep so they fire once.
     void clear_orders() {
         move_requested = false;
         attack_requested = false;
     }
-    void consume_one_shots() { place_requested = false; }
+    void consume_one_shots() {
+        place_requested = false;
+        flash_requested = false;
+        toggle_cooldowns = false;
+    }
 };
 
 static int dummy_at(const World& w, const Vector2 p) {
@@ -135,6 +167,13 @@ static void poll_input(const World& w, Commands& cmds, const Camera2D& camera) {
         cmds.place_requested = true;
         cmds.place_point = GetScreenToWorld2D(GetMousePosition(), camera);
     }
+    if (IsKeyPressed(KEY_D)) {
+        cmds.flash_requested = true;
+        cmds.flash_point = GetScreenToWorld2D(GetMousePosition(), camera);
+    }
+    if (IsKeyPressed(KEY_N)) {
+        cmds.toggle_cooldowns = true;
+    }
 }
 
 static void spawn_dummy(World& w, const Vector2 pos) {
@@ -172,6 +211,31 @@ static void apply_commands(World& w, const Commands& cmds) {
     }
     if (cmds.place_requested) {
         spawn_dummy(w, cmds.place_point);
+    }
+}
+
+// Abilities + cooldown ticking. Runs before movement (spec section 4).
+static void abilities_system(World& w, const Commands& cmds, const float dt) {
+    Champion& c = w.champ;
+    c.flash.tick(dt);
+    c.ghost.tick(dt);
+    c.ignite.tick(dt);
+
+    if (cmds.toggle_cooldowns) {
+        w.cooldowns_enabled = !w.cooldowns_enabled;
+    }
+
+    if (cmds.flash_requested && (!w.cooldowns_enabled || c.flash.ready())) {
+        // Instant blink toward the cursor, capped at flash range.
+        const Vector2 delta = Vector2Subtract(cmds.flash_point, c.pos);
+        const float dist = Vector2Length(delta);
+        c.pos = dist > k_flash_range
+                    ? Vector2Add(c.pos, Vector2Scale(Vector2Normalize(delta), k_flash_range))
+                    : cmds.flash_point;
+        c.prev_pos = c.pos;  // teleport: don't interpolate a slide across the blink
+        if (w.cooldowns_enabled) {
+            c.flash.trigger();
+        }
     }
 }
 
@@ -247,6 +311,7 @@ static void update(World& w, const Commands& cmds, const float dt) {
     w.champ.prev_pos = w.champ.pos;
 
     apply_commands(w, cmds);
+    abilities_system(w, cmds, dt);
     movement_system(w.champ, dt);
     combat_system(w, dt);
     projectile_system(w, dt);
@@ -344,6 +409,56 @@ static void draw_cursor() {
     DrawLineEx(pts[0], streak_end, 2.5f, accent);
 }
 
+static void draw_ability_slot(const float x, const float y, const float size, const char* key,
+                              const char* name, const Cooldown& cd, const bool practice) {
+    const Rectangle box{x, y, size, size};
+    const bool ready = practice || cd.ready();
+
+    DrawRectangleRec(box, Color{28, 32, 42, 235});
+    DrawRectangleLinesEx(box, 2.0f, ready ? Color{214, 196, 110, 255} : Color{70, 76, 92, 255});
+
+    const Vector2 center{x + size * 0.5f, y + size * 0.5f};
+
+    if (!practice && cd.remaining > 0.0f && cd.total > 0.0f) {
+        const float frac = Clamp(cd.remaining / cd.total, 0.0f, 1.0f);
+        DrawCircleSector(center, size * 0.5f, -90.0f, -90.0f + 360.0f * frac, 48,
+                         Color{0, 0, 0, 150});
+        const char* num = TextFormat("%.0f", static_cast<double>(ceilf(cd.remaining)));
+        const int nw = MeasureText(num, 24);
+        DrawText(num, static_cast<int>(center.x) - nw / 2, static_cast<int>(center.y) - 12, 24,
+                 RAYWHITE);
+    } else {
+        const int kw = MeasureText(key, 28);
+        DrawText(key, static_cast<int>(center.x) - kw / 2, static_cast<int>(center.y) - 14, 28,
+                 ready ? RAYWHITE : Color{150, 156, 170, 255});
+    }
+
+    const int label_w = MeasureText(name, 16);
+    DrawText(name, static_cast<int>(center.x) - label_w / 2, static_cast<int>(y + size) + 4, 16,
+             Color{180, 186, 200, 255});
+}
+
+static void draw_ability_bar(const World& w) {
+    const Champion& c = w.champ;
+    const float size = 64.0f;
+    const float gap = 12.0f;
+    const float total_w = size * 3.0f + gap * 2.0f;
+    const float x0 = (static_cast<float>(k_window_size_x) - total_w) * 0.5f;
+    const float y = static_cast<float>(k_window_size_y) - size - 28.0f;
+    const bool practice = !w.cooldowns_enabled;
+
+    draw_ability_slot(x0, y, size, "D", "Flash", c.flash, practice);
+    draw_ability_slot(x0 + (size + gap), y, size, "F", "Ghost", c.ghost, practice);
+    draw_ability_slot(x0 + (size + gap) * 2.0f, y, size, "R", "Ignite", c.ignite, practice);
+
+    if (practice) {
+        const char* t = "NO COOLDOWNS (N)";
+        const int tw = MeasureText(t, 20);
+        DrawText(t, static_cast<int>(x0 + total_w * 0.5f) - tw / 2, static_cast<int>(y) - 28, 20,
+                 Color{120, 220, 140, 255});
+    }
+}
+
 static void render(const World& w, const Vector2 champ_pos, const float alpha,
                    const Camera2D& camera) {
     BeginDrawing();
@@ -392,9 +507,11 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
     }
     EndMode2D();
 
+    draw_ability_bar(w);
+
     draw_cursor();
     DrawFPS(10, 10);
-    DrawText("Right-click: move / attack dummy    T: place dummy", 10, 35, 20,
+    DrawText("Right-click: move / attack    T: dummy    D: flash    N: no-cooldowns", 10, 35, 20,
              Color{200, 200, 210, 255});
     EndDrawing();
 }
