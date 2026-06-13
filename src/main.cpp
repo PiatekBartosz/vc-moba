@@ -106,6 +106,7 @@ struct World {
     std::vector<Dummy> dummies;
     std::vector<Projectile> projectiles;
     std::vector<FloatingText> popups;
+    std::vector<Rectangle> walls;
     bool cooldowns_enabled = true;  // practice toggle (false == abilities always ready)
     int next_id = 0;
 };
@@ -394,6 +395,43 @@ static void combat_system(World& w, const float dt) {
     }
 }
 
+// Push the champion circle out of any wall it overlaps. Resolving perpendicular to
+// the nearest wall face preserves tangential motion, so the champion slides.
+static void collision_system(World& w) {
+    Champion& c = w.champ;
+    const float r = k_champ_radius;
+    for (int pass = 0; pass < 2; ++pass) {  // a couple of passes settle corners
+        for (const Rectangle& wall : w.walls) {
+            const Vector2 closest{Clamp(c.pos.x, wall.x, wall.x + wall.width),
+                                  Clamp(c.pos.y, wall.y, wall.y + wall.height)};
+            const Vector2 delta = Vector2Subtract(c.pos, closest);
+            const float dist = Vector2Length(delta);
+            if (dist >= r) {
+                continue;
+            }
+            if (dist > 0.001f) {
+                c.pos = Vector2Add(closest, Vector2Scale(Vector2Normalize(delta), r));
+            } else {
+                // Center is inside the rect: eject along the shallowest axis.
+                const float left = c.pos.x - wall.x;
+                const float right = (wall.x + wall.width) - c.pos.x;
+                const float top = c.pos.y - wall.y;
+                const float bottom = (wall.y + wall.height) - c.pos.y;
+                const float m = fminf(fminf(left, right), fminf(top, bottom));
+                if (m == left) {
+                    c.pos.x = wall.x - r;
+                } else if (m == right) {
+                    c.pos.x = wall.x + wall.width + r;
+                } else if (m == top) {
+                    c.pos.y = wall.y - r;
+                } else {
+                    c.pos.y = wall.y + wall.height + r;
+                }
+            }
+        }
+    }
+}
+
 // Homing projectiles advance toward their target and apply damage on contact.
 static void projectile_system(World& w, const float dt) {
     for (Projectile& p : w.projectiles) {
@@ -437,6 +475,7 @@ static void update(World& w, const Commands& cmds, const float dt) {
     abilities_system(w, cmds, dt);
     movement_system(w.champ, dt);
     combat_system(w, dt);
+    collision_system(w);
     projectile_system(w, dt);
     effects_system(w, dt);
 }
@@ -614,6 +653,10 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
 
     BeginMode2D(camera);
     draw_grid();
+    for (const Rectangle& wall : w.walls) {
+        DrawRectangleRec(wall, Color{55, 58, 70, 255});
+        DrawRectangleLinesEx(wall, 2.0f, Color{95, 100, 120, 255});
+    }
     for (const Dummy& d : w.dummies) {
         draw_dummy(d);
     }
@@ -680,6 +723,9 @@ int main() {
     HideCursor();  // we draw our own cursor in draw_cursor()
 
     World world{};
+    world.walls.push_back(Rectangle{300.0f, -180.0f, 70.0f, 360.0f});   // flash over this
+    world.walls.push_back(Rectangle{-560.0f, 220.0f, 380.0f, 70.0f});
+    world.walls.push_back(Rectangle{-600.0f, -380.0f, 70.0f, 320.0f});
 
     Camera2D camera{};
     camera.offset = Vector2{k_window_size_x / 2.0f, k_window_size_y / 2.0f};
