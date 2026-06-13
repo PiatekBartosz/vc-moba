@@ -1,6 +1,7 @@
 #include "render.hpp"
 
 #include "raymath.h"
+#include "rlgl.h"
 
 #include "config.hpp"
 
@@ -17,14 +18,130 @@ static void draw_ground() {
     DrawGrid(static_cast<int>(extent / k_grid_spacing), k_grid_spacing);
 }
 
-static void draw_dummy_3d(const Dummy& d) {
-    const Vector3 base = to3d(d.pos, 0.0f);
-    DrawCylinder(base, d.radius, d.radius, k_dummy_height, 16, Color{170, 110, 90, 255});
-    DrawCylinderWires(base, d.radius, d.radius, k_dummy_height, 16, Color{230, 180, 160, 255});
-    if (d.ignite_left > 0.0f) {  // burning indicator
-        ground_ring(d.pos, d.radius + 5.0f, Color{240, 140, 40, 255});
-        ground_ring(d.pos, d.radius + 9.0f, Color{220, 90, 30, 255});
+// Gwen-style training dummy: wooden base + post, burlap sacks, rope ties, a painted
+// bullseye on the chest, and a wooden cross-arm. Idle wobble (worse while burning).
+static void draw_dummy_3d(const Dummy& d, const float t) {
+    const Color wood{120, 80, 45, 255};
+    const Color wood_dark{92, 60, 33, 255};
+    const Color burlap{206, 184, 138, 255};
+    const Color burlap_dark{168, 146, 102, 255};
+    const Color rope{152, 122, 72, 255};
+    const Color paint{182, 52, 46, 255};
+    const Color paint_light{232, 232, 220, 255};
+
+    const float phase = static_cast<float>(d.id) * 1.7f;
+    const bool burning = d.ignite_left > 0.0f;
+    const float sway = sinf(t * (burning ? 7.0f : 1.6f) + phase) * (burning ? 7.0f : 3.5f);
+    const float bob = sinf(t * 2.2f + phase) * 1.5f;
+
+    rlPushMatrix();
+    rlTranslatef(d.pos.x, bob, d.pos.y);
+    rlRotatef(sway, 0.0f, 0.0f, 1.0f);  // wobble toward/away from the camera
+
+    // Base + central post.
+    DrawCylinder(Vector3{0.0f, 0.0f, 0.0f}, 30.0f, 34.0f, 10.0f, 18, wood_dark);
+    DrawCylinderWires(Vector3{0.0f, 0.0f, 0.0f}, 30.0f, 34.0f, 10.0f, 18, wood);
+    DrawCylinder(Vector3{0.0f, 8.0f, 0.0f}, 5.0f, 5.0f, 64.0f, 10, wood);
+
+    // Wooden cross-arm.
+    DrawCube(Vector3{0.0f, 80.0f, 0.0f}, 124.0f, 8.0f, 8.0f, wood);
+    DrawCubeWires(Vector3{0.0f, 80.0f, 0.0f}, 124.0f, 8.0f, 8.0f, wood_dark);
+
+    // Burlap body: two stacked rounded sacks with a rope tie between them.
+    DrawSphere(Vector3{0.0f, 56.0f, 0.0f}, 30.0f, burlap);
+    DrawSphere(Vector3{0.0f, 92.0f, 0.0f}, 26.0f, burlap);
+    DrawCylinder(Vector3{0.0f, 70.0f, 0.0f}, 27.5f, 27.5f, 6.0f, 18, rope);
+
+    // Neck + head + top knot.
+    DrawCylinder(Vector3{0.0f, 108.0f, 0.0f}, 10.0f, 10.0f, 8.0f, 12, rope);
+    DrawSphere(Vector3{0.0f, 126.0f, 0.0f}, 19.0f, burlap);
+    DrawSphere(Vector3{0.0f, 143.0f, 0.0f}, 7.0f, burlap_dark);
+
+    // Painted bullseye on the chest (faces +Z, toward the camera).
+    const float fz = 30.0f;
+    DrawCircle3D(Vector3{0.0f, 92.0f, fz}, 16.0f, Vector3{1.0f, 0.0f, 0.0f}, 0.0f, paint);
+    DrawCircle3D(Vector3{0.0f, 92.0f, fz}, 11.0f, Vector3{1.0f, 0.0f, 0.0f}, 0.0f, paint_light);
+    DrawCircle3D(Vector3{0.0f, 92.0f, fz}, 6.0f, Vector3{1.0f, 0.0f, 0.0f}, 0.0f, paint);
+    DrawSphere(Vector3{0.0f, 92.0f, fz}, 2.6f, paint);
+
+    rlPopMatrix();
+}
+
+// Vayne-style night hunter, built from primitives: flared crimson coat, leather body,
+// cape, wide-brim hat, and a crossbow held forward. Walk cycle + facing + windup glow.
+static void draw_champion_3d(const Vector2 pos, const Champion& champ, const Vector2 facing,
+                             const bool moving, const float t) {
+    const Color coat{112, 30, 40, 255};
+    const Color coat_dark{78, 20, 28, 255};
+    const Color leather{30, 28, 36, 255};
+    const Color skin{226, 190, 162, 255};
+    const Color steel{156, 162, 178, 255};
+    const Color glow{250, 230, 140, 255};
+
+    Vector2 dir = facing;
+    if (Vector2Length(dir) < 0.001f) {
+        dir = Vector2{0.0f, 1.0f};
     }
+    const float yaw = atan2f(dir.x, dir.y) * RAD2DEG;
+    const float walk = moving ? sinf(t * 12.0f) : 0.0f;
+    const float bob = moving ? fabsf(sinf(t * 12.0f)) * 2.5f : sinf(t * 2.0f) * 1.0f;
+
+    rlPushMatrix();
+    rlTranslatef(pos.x, bob, pos.y);
+    rlRotatef(yaw, 0.0f, 1.0f, 0.0f);  // local +Z is "forward"
+
+    // Legs (swing fore/aft when walking).
+    for (int s = -1; s <= 1; s += 2) {
+        const float side = static_cast<float>(s);
+        rlPushMatrix();
+        rlTranslatef(7.0f * side, 26.0f, 0.0f);
+        rlRotatef(walk * 20.0f * side, 1.0f, 0.0f, 0.0f);
+        DrawCylinder(Vector3{0.0f, -26.0f, 0.0f}, 5.0f, 6.0f, 26.0f, 10, leather);
+        rlPopMatrix();
+    }
+
+    // Flared coat skirt + torso + belt.
+    DrawCylinder(Vector3{0.0f, 16.0f, 0.0f}, 13.0f, 22.0f, 26.0f, 18, coat);
+    DrawCylinderWires(Vector3{0.0f, 16.0f, 0.0f}, 13.0f, 22.0f, 26.0f, 18, coat_dark);
+    DrawCylinder(Vector3{0.0f, 40.0f, 0.0f}, 12.0f, 13.0f, 20.0f, 14, leather);
+    DrawSphere(Vector3{0.0f, 52.0f, 0.0f}, 13.0f, coat);
+    DrawCylinder(Vector3{0.0f, 39.0f, 0.0f}, 13.5f, 13.5f, 4.0f, 16, leather);
+
+    // Cape behind (local -Z), tilted out.
+    rlPushMatrix();
+    rlTranslatef(0.0f, 44.0f, -11.0f);
+    rlRotatef(14.0f, 1.0f, 0.0f, 0.0f);
+    DrawCube(Vector3{0.0f, 0.0f, 0.0f}, 26.0f, 44.0f, 3.0f, coat_dark);
+    rlPopMatrix();
+
+    // Shoulders + arms reaching forward to the crossbow.
+    DrawSphere(Vector3{-13.0f, 60.0f, 0.0f}, 6.0f, leather);
+    DrawSphere(Vector3{13.0f, 60.0f, 0.0f}, 6.0f, leather);
+    for (int s = -1; s <= 1; s += 2) {
+        const float side = static_cast<float>(s);
+        rlPushMatrix();
+        rlTranslatef(13.0f * side, 60.0f, 0.0f);
+        rlRotatef(-65.0f - walk * 8.0f * side, 1.0f, 0.0f, 0.0f);
+        DrawCylinder(Vector3{0.0f, -16.0f, 0.0f}, 4.0f, 4.0f, 16.0f, 8, leather);
+        rlPopMatrix();
+    }
+
+    // Head + wide-brim hat.
+    DrawSphere(Vector3{0.0f, 70.0f, 0.0f}, 8.0f, skin);
+    DrawCylinder(Vector3{0.0f, 75.0f, 0.0f}, 16.0f, 16.0f, 2.5f, 20, leather);
+    DrawCylinder(Vector3{0.0f, 77.0f, 0.0f}, 9.0f, 7.0f, 9.0f, 14, leather);
+
+    // Crossbow held in front; bolt tip glows while winding up an attack.
+    rlPushMatrix();
+    rlTranslatef(0.0f, 50.0f, 16.0f);
+    DrawCube(Vector3{0.0f, 0.0f, 0.0f}, 4.0f, 4.0f, 18.0f, steel);
+    DrawCube(Vector3{0.0f, 0.0f, 6.0f}, 24.0f, 2.5f, 3.0f, steel);
+    if (champ.windup > 0.0f) {
+        DrawSphere(Vector3{0.0f, 0.0f, 12.0f}, 3.4f, glow);
+    }
+    rlPopMatrix();
+
+    rlPopMatrix();
 }
 
 // --- screen-space (2D) helpers -----------------------------------------------
@@ -176,6 +293,8 @@ void render(const World& w, const Vector2 champ_pos, const float alpha,
     BeginDrawing();
     ClearBackground(Color{14, 15, 20, 255});
 
+    const float t = static_cast<float>(GetTime());
+
     BeginMode3D(camera);
     draw_ground();
 
@@ -208,16 +327,29 @@ void render(const World& w, const Vector2 champ_pos, const float alpha,
     }
 
     for (const Dummy& d : w.dummies) {
-        draw_dummy_3d(d);
+        draw_dummy_3d(d, t);
+        if (d.ignite_left > 0.0f) {  // burning indicator on the ground
+            ground_ring(d.pos, d.radius + 6.0f, Color{240, 140, 40, 255});
+            ground_ring(d.pos, d.radius + 11.0f, Color{220, 90, 30, 255});
+        }
     }
 
-    // Champion: a cylinder that turns gold while winding up an attack.
-    const Vector3 champ_base = to3d(champ_pos, 0.0f);
-    const Color champ_fill =
-        w.champ.windup > 0.0f ? Color{230, 200, 90, 255} : Color{90, 150, 240, 255};
-    DrawCylinder(champ_base, k_champ_radius, k_champ_radius, k_champ_height, 20, champ_fill);
-    DrawCylinderWires(champ_base, k_champ_radius, k_champ_radius, k_champ_height, 20,
-                      Color{200, 220, 255, 255});
+    // Champion (Vayne-style). Face the velocity while moving, else the target.
+    const Vector2 velocity = Vector2Subtract(champ_pos, w.champ.prev_pos);
+    const bool moving = Vector2Length(velocity) > 0.05f;
+    Vector2 facing{0.0f, 1.0f};
+    if (moving) {
+        facing = velocity;
+    } else if (w.champ.order == Champion::Order::AttackTarget ||
+               w.champ.order == Champion::Order::AttackMove) {
+        for (const Dummy& d : w.dummies) {
+            if (d.id == w.champ.target_id) {
+                facing = Vector2Subtract(d.pos, champ_pos);
+                break;
+            }
+        }
+    }
+    draw_champion_3d(champ_pos, w.champ, facing, moving, t);
 
     // Projectiles (interpolated), drawn as airborne spheres.
     for (const Projectile& p : w.projectiles) {
