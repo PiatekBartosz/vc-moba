@@ -89,6 +89,7 @@ static void draw_champion_3d(const Vector2 pos, const Champion& champ, const Vec
     rlPushMatrix();
     rlTranslatef(pos.x, bob, pos.y);
     rlRotatef(yaw, 0.0f, 1.0f, 0.0f);  // local +Z is "forward"
+    rlScalef(k_champ_model_scale, k_champ_model_scale, k_champ_model_scale);
 
     // Legs (swing fore/aft when walking).
     for (int s = -1; s <= 1; s += 2) {

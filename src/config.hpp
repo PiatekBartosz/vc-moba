@@ -44,6 +44,7 @@ inline constexpr float k_dummy_hp = 1000.0f;
 // 3D presentation. The sim is flat 2D; world (x, y) maps onto the ground as the 3D
 // (x, 0, y) plane, with the 3D Y axis used for height. A fixed tilted camera follows
 // the champion for a League-style top-down perspective.
+inline constexpr float k_champ_model_scale = 1.8f;  // visual only; hitbox stays k_champ_radius
 inline constexpr float k_champ_height = 72.0f;
 inline constexpr float k_dummy_height = 84.0f;
 inline constexpr float k_wall_height = 140.0f;
