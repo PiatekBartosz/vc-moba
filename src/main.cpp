@@ -23,6 +23,8 @@ inline constexpr float k_windup_fraction = 0.3f;  // share of the attack cycle s
 
 inline constexpr float k_flash_range = 400.0f;
 inline constexpr float k_flash_cd = 300.0f;
+inline constexpr float k_ghost_bonus = 0.30f;  // +30% move speed
+inline constexpr float k_ghost_duration = 10.0f;
 inline constexpr float k_ghost_cd = 210.0f;
 inline constexpr float k_ignite_cd = 180.0f;
 
@@ -65,6 +67,7 @@ struct Champion {
 
     float atk_cooldown = 0.0f;  // time until the next attack is allowed
     float windup = 0.0f;        // >0 == mid-attack; damage point is when it reaches 0
+    float ghost_buff = 0.0f;    // seconds of move-speed buff remaining
 
     Cooldown flash{0.0f, k_flash_cd};
     Cooldown ghost{0.0f, k_ghost_cd};
@@ -116,6 +119,8 @@ struct Commands {
     bool flash_requested = false;
     Vector2 flash_point{0.0f, 0.0f};
 
+    bool ghost_requested = false;
+
     bool toggle_cooldowns = false;
 
     // Order latches (move/attack) are re-issued each frame and cleared after the
@@ -127,6 +132,7 @@ struct Commands {
     void consume_one_shots() {
         place_requested = false;
         flash_requested = false;
+        ghost_requested = false;
         toggle_cooldowns = false;
     }
 };
@@ -171,6 +177,9 @@ static void poll_input(const World& w, Commands& cmds, const Camera2D& camera) {
         cmds.flash_requested = true;
         cmds.flash_point = GetScreenToWorld2D(GetMousePosition(), camera);
     }
+    if (IsKeyPressed(KEY_F)) {
+        cmds.ghost_requested = true;
+    }
     if (IsKeyPressed(KEY_N)) {
         cmds.toggle_cooldowns = true;
     }
@@ -194,8 +203,12 @@ static void apply_damage(World& w, Dummy& d, const float dmg) {
     w.popups.push_back(FloatingText{d.pos, dmg, k_popup_life});
 }
 
+static float effective_move_speed(const Champion& c) {
+    return c.ghost_buff > 0.0f ? c.move_speed * (1.0f + k_ghost_bonus) : c.move_speed;
+}
+
 static void step_toward(Champion& c, const Vector2 target, const float dt) {
-    c.pos = Vector2MoveTowards(c.pos, target, c.move_speed * dt);
+    c.pos = Vector2MoveTowards(c.pos, target, effective_move_speed(c) * dt);
 }
 
 static void apply_commands(World& w, const Commands& cmds) {
@@ -235,6 +248,13 @@ static void abilities_system(World& w, const Commands& cmds, const float dt) {
         c.prev_pos = c.pos;  // teleport: don't interpolate a slide across the blink
         if (w.cooldowns_enabled) {
             c.flash.trigger();
+        }
+    }
+
+    if (cmds.ghost_requested && (!w.cooldowns_enabled || c.ghost.ready())) {
+        c.ghost_buff = k_ghost_duration;
+        if (w.cooldowns_enabled) {
+            c.ghost.trigger();
         }
     }
 }
@@ -298,8 +318,11 @@ static void projectile_system(World& w, const float dt) {
     std::erase_if(w.projectiles, [](const Projectile& p) { return !p.live; });
 }
 
-// Floating damage numbers drift up and fade, then get cleaned up.
+// Buff expiry + floating damage numbers drift up and fade, then get cleaned up.
 static void effects_system(World& w, const float dt) {
+    if (w.champ.ghost_buff > 0.0f) {
+        w.champ.ghost_buff -= dt;
+    }
     for (FloatingText& f : w.popups) {
         f.pos.y -= k_popup_rise * dt;
         f.life -= dt;
@@ -492,6 +515,11 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
     DrawCircleV(champ_pos, k_champ_radius, champ_fill);
     DrawCircleLinesV(champ_pos, k_champ_radius, Color{200, 220, 255, 255});
 
+    // Ghost buff: a green speed ring around the champion.
+    if (w.champ.ghost_buff > 0.0f) {
+        DrawCircleLinesV(champ_pos, k_champ_radius + 6.0f, Color{120, 240, 150, 255});
+    }
+
     // Projectiles (interpolated for smoothness at high frame rates).
     for (const Projectile& p : w.projectiles) {
         const Vector2 pp = Vector2Lerp(p.prev_pos, p.pos, alpha);
@@ -511,8 +539,8 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
 
     draw_cursor();
     DrawFPS(10, 10);
-    DrawText("Right-click: move / attack    T: dummy    D: flash    N: no-cooldowns", 10, 35, 20,
-             Color{200, 200, 210, 255});
+    DrawText("Right-click: move / attack    T: dummy    D: flash    F: ghost    N: no-cooldowns",
+             10, 35, 20, Color{200, 200, 210, 255});
     EndDrawing();
 }
 
