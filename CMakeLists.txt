@@ -25,5 +25,11 @@ target_compile_options(project_warnings INTERFACE
     $<$<CXX_COMPILER_ID:MSVC>:/W4;/permissive-;/WX>
 )
 
-add_executable(practice src/main.cpp)
+add_executable(practice
+    src/main.cpp
+    src/systems.cpp
+    src/input.cpp
+    src/render.cpp
+)
+target_include_directories(practice PRIVATE src)
 target_link_libraries(practice PRIVATE raylib project_warnings)
