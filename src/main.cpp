@@ -26,6 +26,8 @@ inline constexpr float k_flash_cd = 300.0f;
 inline constexpr float k_ghost_bonus = 0.30f;  // +30% move speed
 inline constexpr float k_ghost_duration = 10.0f;
 inline constexpr float k_ghost_cd = 210.0f;
+inline constexpr float k_ignite_dps = 50.0f;
+inline constexpr float k_ignite_duration = 5.0f;
 inline constexpr float k_ignite_cd = 180.0f;
 
 inline constexpr float k_projectile_speed = 1800.0f;
@@ -80,6 +82,8 @@ struct Dummy {
     float radius = k_dummy_radius;
     float hp = k_dummy_hp;
     float max_hp = k_dummy_hp;
+    float ignite_left = 0.0f;  // seconds of ignite DoT remaining
+    float ignite_dps = 0.0f;
 };
 
 struct Projectile {
@@ -124,6 +128,9 @@ struct Commands {
 
     bool ghost_requested = false;
 
+    bool ignite_requested = false;
+    int ignite_target_id = -1;
+
     bool toggle_cooldowns = false;
 
     // Order latches (move/attack) are re-issued each frame and cleared after the
@@ -136,6 +143,7 @@ struct Commands {
         place_requested = false;
         flash_requested = false;
         ghost_requested = false;
+        ignite_requested = false;
         toggle_cooldowns = false;
         attack_move_requested = false;
     }
@@ -144,6 +152,7 @@ struct Commands {
 // Cross-frame input state (UI modes that persist between frames).
 struct InputState {
     bool attack_move_armed = false;  // 'A' pressed, waiting for a left-click target point
+    bool ignite_armed = false;       // 'R' pressed, waiting for a left-click on a dummy
 };
 
 static int dummy_at(const World& w, const Vector2 p) {
@@ -196,18 +205,34 @@ static void poll_input(const World& w, Commands& cmds, InputState& in, const Cam
         }
     }
 
-    // Attack-move: press A to arm, then left-click a point. Right-click / Esc cancels.
+    // Targeting modes: press A (attack-move) or R (ignite) to arm, then left-click.
+    // Arming is mutually exclusive; right-click / Esc cancels.
     if (IsKeyPressed(KEY_A)) {
         in.attack_move_armed = true;
+        in.ignite_armed = false;
     }
-    if (in.attack_move_armed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        cmds.attack_move_requested = true;
-        cmds.attack_move_point = GetScreenToWorld2D(GetMousePosition(), camera);
+    if (IsKeyPressed(KEY_R)) {
+        in.ignite_armed = true;
         in.attack_move_armed = false;
     }
-    if (in.attack_move_armed &&
-        (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsKeyPressed(KEY_ESCAPE))) {
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        const Vector2 wp = GetScreenToWorld2D(GetMousePosition(), camera);
+        if (in.attack_move_armed) {
+            cmds.attack_move_requested = true;
+            cmds.attack_move_point = wp;
+        } else if (in.ignite_armed) {
+            const int hit = dummy_at(w, wp);
+            if (hit >= 0) {
+                cmds.ignite_requested = true;
+                cmds.ignite_target_id = hit;
+            }
+        }
         in.attack_move_armed = false;
+        in.ignite_armed = false;  // a left-click resolves (or wastes) the armed mode
+    }
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsKeyPressed(KEY_ESCAPE)) {
+        in.attack_move_armed = false;
+        in.ignite_armed = false;
     }
 
     if (IsKeyPressed(KEY_T)) {
@@ -302,6 +327,16 @@ static void abilities_system(World& w, const Commands& cmds, const float dt) {
             c.ghost.trigger();
         }
     }
+
+    if (cmds.ignite_requested && (!w.cooldowns_enabled || c.ignite.ready())) {
+        if (Dummy* t = find_dummy(w, cmds.ignite_target_id); t != nullptr) {
+            t->ignite_left = k_ignite_duration;
+            t->ignite_dps = k_ignite_dps;
+            if (w.cooldowns_enabled) {
+                c.ignite.trigger();
+            }
+        }
+    }
 }
 
 static void movement_system(Champion& c, const float dt) {
@@ -382,6 +417,12 @@ static void effects_system(World& w, const float dt) {
     if (w.champ.ghost_buff > 0.0f) {
         w.champ.ghost_buff -= dt;
     }
+    for (Dummy& d : w.dummies) {
+        if (d.ignite_left > 0.0f) {
+            d.hp = fmaxf(0.0f, d.hp - d.ignite_dps * dt);
+            d.ignite_left -= dt;
+        }
+    }
     for (FloatingText& f : w.popups) {
         f.pos.y -= k_popup_rise * dt;
         f.life -= dt;
@@ -431,6 +472,10 @@ static void draw_health_bar(const Vector2 center, const float radius, const floa
 static void draw_dummy(const Dummy& d) {
     DrawCircleV(d.pos, d.radius, Color{170, 110, 90, 255});
     DrawCircleLinesV(d.pos, d.radius, Color{230, 180, 160, 255});
+    if (d.ignite_left > 0.0f) {  // burning indicator
+        DrawCircleLinesV(d.pos, d.radius + 5.0f, Color{240, 140, 40, 255});
+        DrawCircleLinesV(d.pos, d.radius + 9.0f, Color{220, 90, 30, 200});
+    }
     draw_health_bar(d.pos, d.radius, d.hp, d.max_hp);
 }
 
@@ -444,19 +489,25 @@ static void fill_poly(const Vector2* p, const int n, const Color c) {
     }
 }
 
-static void draw_cursor(const bool attack_armed) {
+static void draw_reticle(const Vector2 m, const Color c) {
+    DrawCircleLinesV(m, 17.0f, c);
+    DrawCircleLinesV(m, 10.0f, c);
+    DrawLineV(Vector2{m.x - 22.0f, m.y}, Vector2{m.x - 13.0f, m.y}, c);
+    DrawLineV(Vector2{m.x + 22.0f, m.y}, Vector2{m.x + 13.0f, m.y}, c);
+    DrawLineV(Vector2{m.x, m.y - 22.0f}, Vector2{m.x, m.y - 13.0f}, c);
+    DrawLineV(Vector2{m.x, m.y + 22.0f}, Vector2{m.x, m.y + 13.0f}, c);
+    DrawCircleV(m, 2.0f, c);
+}
+
+static void draw_cursor(const bool attack_armed, const bool ignite_armed) {
     const Vector2 m = GetMousePosition();
 
-    if (attack_armed) {
-        // Attack-move reticle (League-style): red concentric rings + ticks.
-        const Color red{235, 80, 70, 255};
-        DrawCircleLinesV(m, 17.0f, red);
-        DrawCircleLinesV(m, 10.0f, red);
-        DrawLineV(Vector2{m.x - 22.0f, m.y}, Vector2{m.x - 13.0f, m.y}, red);
-        DrawLineV(Vector2{m.x + 22.0f, m.y}, Vector2{m.x + 13.0f, m.y}, red);
-        DrawLineV(Vector2{m.x, m.y - 22.0f}, Vector2{m.x, m.y - 13.0f}, red);
-        DrawLineV(Vector2{m.x, m.y + 22.0f}, Vector2{m.x, m.y + 13.0f}, red);
-        DrawCircleV(m, 2.0f, red);
+    if (attack_armed) {  // League-style attack-move reticle
+        draw_reticle(m, Color{235, 80, 70, 255});
+        return;
+    }
+    if (ignite_armed) {  // ignite targeting reticle
+        draw_reticle(m, Color{245, 150, 50, 255});
         return;
     }
 
@@ -556,7 +607,8 @@ static void draw_ability_bar(const World& w) {
 }
 
 static void render(const World& w, const Vector2 champ_pos, const float alpha,
-                   const bool attack_move_armed, const Camera2D& camera) {
+                   const bool attack_move_armed, const bool ignite_armed,
+                   const Camera2D& camera) {
     BeginDrawing();
     ClearBackground(Color{18, 18, 22, 255});
 
@@ -614,10 +666,10 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
 
     draw_ability_bar(w);
 
-    draw_cursor(attack_move_armed);
+    draw_cursor(attack_move_armed, ignite_armed);
     DrawFPS(10, 10);
     DrawText(
-        "Right-click: move / attack    A+left-click: attack-move    T: dummy    D: flash    F: ghost    N: no-cooldowns",
+        "RMB: move/attack   A+LMB: attack-move   R+LMB: ignite   T: dummy   D: flash   F: ghost   N: no-cd",
         10, 35, 20, Color{200, 200, 210, 255});
     EndDrawing();
 }
@@ -660,7 +712,7 @@ int main() {
         const Vector2 champ_pos = Vector2Lerp(world.champ.prev_pos, world.champ.pos, alpha);
 
         camera.target = champ_pos;
-        render(world, champ_pos, alpha, input.attack_move_armed, camera);
+        render(world, champ_pos, alpha, input.attack_move_armed, input.ignite_armed, camera);
     }
 
     CloseWindow();
