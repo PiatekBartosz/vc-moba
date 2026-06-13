@@ -60,7 +60,7 @@ struct Champion {
     float attacks_per_sec = k_attacks_per_sec;
     float atk_damage = k_attack_damage;
 
-    enum class Order { Idle, MoveToPoint, AttackTarget };
+    enum class Order { Idle, MoveToPoint, AttackTarget, AttackMove };
     Order order = Order::Idle;
     Vector2 move_point{0.0f, 0.0f};
     int target_id = -1;
@@ -113,6 +113,9 @@ struct Commands {
     bool attack_requested = false;
     int attack_target_id = -1;
 
+    bool attack_move_requested = false;
+    Vector2 attack_move_point{0.0f, 0.0f};
+
     bool place_requested = false;
     Vector2 place_point{0.0f, 0.0f};
 
@@ -134,7 +137,13 @@ struct Commands {
         flash_requested = false;
         ghost_requested = false;
         toggle_cooldowns = false;
+        attack_move_requested = false;
     }
+};
+
+// Cross-frame input state (UI modes that persist between frames).
+struct InputState {
+    bool attack_move_armed = false;  // 'A' pressed, waiting for a left-click target point
 };
 
 static int dummy_at(const World& w, const Vector2 p) {
@@ -155,7 +164,24 @@ static Dummy* find_dummy(World& w, const int id) {
     return nullptr;
 }
 
-static void poll_input(const World& w, Commands& cmds, const Camera2D& camera) {
+// Nearest living dummy within range of pos, or nullptr.
+static Dummy* nearest_dummy_in_range(World& w, const Vector2 pos, const float range) {
+    Dummy* best = nullptr;
+    float best_dist = range;
+    for (Dummy& d : w.dummies) {
+        if (d.hp <= 0.0f) {
+            continue;
+        }
+        const float dist = Vector2Distance(pos, d.pos);
+        if (dist <= best_dist) {
+            best_dist = dist;
+            best = &d;
+        }
+    }
+    return best;
+}
+
+static void poll_input(const World& w, Commands& cmds, InputState& in, const Camera2D& camera) {
     // Hold-to-move (LoL style): while the right button is held, keep re-issuing the
     // order toward the cursor. Right-click on a dummy attacks it; on ground, moves.
     if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
@@ -169,6 +195,21 @@ static void poll_input(const World& w, Commands& cmds, const Camera2D& camera) {
             cmds.move_point = wp;
         }
     }
+
+    // Attack-move: press A to arm, then left-click a point. Right-click / Esc cancels.
+    if (IsKeyPressed(KEY_A)) {
+        in.attack_move_armed = true;
+    }
+    if (in.attack_move_armed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        cmds.attack_move_requested = true;
+        cmds.attack_move_point = GetScreenToWorld2D(GetMousePosition(), camera);
+        in.attack_move_armed = false;
+    }
+    if (in.attack_move_armed &&
+        (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsKeyPressed(KEY_ESCAPE))) {
+        in.attack_move_armed = false;
+    }
+
     if (IsKeyPressed(KEY_T)) {
         cmds.place_requested = true;
         cmds.place_point = GetScreenToWorld2D(GetMousePosition(), camera);
@@ -222,6 +263,10 @@ static void apply_commands(World& w, const Commands& cmds) {
         c.order = Champion::Order::AttackTarget;
         c.target_id = cmds.attack_target_id;
     }
+    if (cmds.attack_move_requested) {
+        c.order = Champion::Order::AttackMove;
+        c.move_point = cmds.attack_move_point;
+    }
     if (cmds.place_requested) {
         spawn_dummy(w, cmds.place_point);
     }
@@ -270,6 +315,7 @@ static void movement_system(Champion& c, const float dt) {
 }
 
 // Auto-attack state machine (chase -> windup -> damage point). See spec section 6.
+// Handles explicit AttackTarget and attack-move (auto-acquire nearby dummies).
 static void combat_system(World& w, const float dt) {
     Champion& c = w.champ;
     c.atk_cooldown -= dt;
@@ -282,21 +328,34 @@ static void combat_system(World& w, const float dt) {
         return;
     }
 
-    if (c.order != Champion::Order::AttackTarget) {
-        return;
-    }
-    Dummy* t = find_dummy(w, c.target_id);
-    if (t == nullptr) {
-        c.order = Champion::Order::Idle;
+    Dummy* t = nullptr;
+    if (c.order == Champion::Order::AttackTarget) {
+        t = find_dummy(w, c.target_id);
+        if (t == nullptr || t->hp <= 0.0f) {  // target gone/dead -> stop
+            c.order = Champion::Order::Idle;
+            return;
+        }
+    } else if (c.order == Champion::Order::AttackMove) {
+        t = nearest_dummy_in_range(w, c.pos, c.attack_range);
+        c.target_id = t != nullptr ? t->id : -1;
+    } else {
         return;
     }
 
-    const float d = Vector2Distance(c.pos, t->pos);
-    if (d > c.attack_range) {
-        step_toward(c, t->pos, dt);  // chase into range
-    } else if (c.atk_cooldown <= 0.0f) {
-        c.windup = k_windup_fraction / c.attacks_per_sec;  // begin the attack
-        c.atk_cooldown = 1.0f / c.attacks_per_sec;
+    if (t != nullptr) {
+        const float d = Vector2Distance(c.pos, t->pos);
+        if (d > c.attack_range) {
+            step_toward(c, t->pos, dt);  // chase into range
+        } else if (c.atk_cooldown <= 0.0f) {
+            c.windup = k_windup_fraction / c.attacks_per_sec;  // begin the attack
+            c.atk_cooldown = 1.0f / c.attacks_per_sec;
+        }
+    } else {
+        // Attack-move with nothing in range: keep advancing toward the destination.
+        step_toward(c, c.move_point, dt);
+        if (Vector2Distance(c.pos, c.move_point) <= k_arrive_epsilon) {
+            c.order = Champion::Order::Idle;
+        }
     }
 }
 
@@ -385,8 +444,22 @@ static void fill_poly(const Vector2* p, const int n, const Color c) {
     }
 }
 
-static void draw_cursor() {
+static void draw_cursor(const bool attack_armed) {
     const Vector2 m = GetMousePosition();
+
+    if (attack_armed) {
+        // Attack-move reticle (League-style): red concentric rings + ticks.
+        const Color red{235, 80, 70, 255};
+        DrawCircleLinesV(m, 17.0f, red);
+        DrawCircleLinesV(m, 10.0f, red);
+        DrawLineV(Vector2{m.x - 22.0f, m.y}, Vector2{m.x - 13.0f, m.y}, red);
+        DrawLineV(Vector2{m.x + 22.0f, m.y}, Vector2{m.x + 13.0f, m.y}, red);
+        DrawLineV(Vector2{m.x, m.y - 22.0f}, Vector2{m.x, m.y - 13.0f}, red);
+        DrawLineV(Vector2{m.x, m.y + 22.0f}, Vector2{m.x, m.y + 13.0f}, red);
+        DrawCircleV(m, 2.0f, red);
+        return;
+    }
+
     const bool moving = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
     constexpr float scale = 1.9f;
 
@@ -483,7 +556,7 @@ static void draw_ability_bar(const World& w) {
 }
 
 static void render(const World& w, const Vector2 champ_pos, const float alpha,
-                   const Camera2D& camera) {
+                   const bool attack_move_armed, const Camera2D& camera) {
     BeginDrawing();
     ClearBackground(Color{18, 18, 22, 255});
 
@@ -496,8 +569,9 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
     // Attack-range indicator around the champion.
     DrawCircleLinesV(champ_pos, w.champ.attack_range, Color{80, 110, 150, 110});
 
-    // Highlight the current attack target.
-    if (w.champ.order == Champion::Order::AttackTarget) {
+    // Highlight the current attack target (explicit or auto-acquired).
+    if (w.champ.order == Champion::Order::AttackTarget ||
+        w.champ.order == Champion::Order::AttackMove) {
         for (const Dummy& d : w.dummies) {
             if (d.id == w.champ.target_id) {
                 DrawCircleLinesV(d.pos, d.radius + 6.0f, Color{240, 210, 80, 255});
@@ -507,6 +581,9 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
     }
     if (w.champ.order == Champion::Order::MoveToPoint) {
         DrawCircleV(w.champ.move_point, 5.0f, Color{120, 200, 120, 255});
+    }
+    if (w.champ.order == Champion::Order::AttackMove) {
+        DrawCircleV(w.champ.move_point, 5.0f, Color{235, 100, 90, 255});
     }
 
     // Champion turns gold while winding up an attack (locked in place).
@@ -537,10 +614,11 @@ static void render(const World& w, const Vector2 champ_pos, const float alpha,
 
     draw_ability_bar(w);
 
-    draw_cursor();
+    draw_cursor(attack_move_armed);
     DrawFPS(10, 10);
-    DrawText("Right-click: move / attack    T: dummy    D: flash    F: ghost    N: no-cooldowns",
-             10, 35, 20, Color{200, 200, 210, 255});
+    DrawText(
+        "Right-click: move / attack    A+left-click: attack-move    T: dummy    D: flash    F: ghost    N: no-cooldowns",
+        10, 35, 20, Color{200, 200, 210, 255});
     EndDrawing();
 }
 
@@ -558,11 +636,12 @@ int main() {
     camera.zoom = 1.0f;
 
     Commands cmds{};
+    InputState input{};
     float acc = 0.0f;
     while (!WindowShouldClose()) {
         // Clamp to avoid a spiral of death if a frame hitches (e.g. window drag).
         acc += fminf(GetFrameTime(), 0.25f);
-        poll_input(world, cmds, camera);
+        poll_input(world, cmds, input, camera);
 
         bool stepped = false;
         while (acc >= k_dt) {
@@ -581,7 +660,7 @@ int main() {
         const Vector2 champ_pos = Vector2Lerp(world.champ.prev_pos, world.champ.pos, alpha);
 
         camera.target = champ_pos;
-        render(world, champ_pos, alpha, camera);
+        render(world, champ_pos, alpha, input.attack_move_armed, camera);
     }
 
     CloseWindow();
