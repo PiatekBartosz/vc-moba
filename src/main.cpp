@@ -1,6 +1,8 @@
 #include "raylib.h"
 #include "raymath.h"
 
+#include <vector>
+
 inline constexpr int k_window_size_x = 1920;
 inline constexpr int k_window_size_y = 1080;
 inline constexpr int k_target_fps = 160;
@@ -14,6 +16,9 @@ inline constexpr float k_move_speed = 340.0f;
 inline constexpr float k_champ_radius = 24.0f;
 inline constexpr float k_arrive_epsilon = 1.0f;
 
+inline constexpr float k_dummy_radius = 28.0f;
+inline constexpr float k_dummy_hp = 1000.0f;
+
 struct Champion {
     Vector2 pos{0.0f, 0.0f};
     Vector2 prev_pos{0.0f, 0.0f};  // sim position one step ago, for render interpolation
@@ -24,13 +29,30 @@ struct Champion {
     Vector2 move_point{0.0f, 0.0f};
 };
 
+struct Dummy {
+    int id = 0;
+    Vector2 pos{0.0f, 0.0f};
+    float radius = k_dummy_radius;
+    float hp = k_dummy_hp;
+    float max_hp = k_dummy_hp;
+};
+
+struct World {
+    Champion champ;
+    std::vector<Dummy> dummies;
+    int next_id = 0;
+};
+
 struct Commands {
     bool move_requested = false;
     Vector2 move_point{0.0f, 0.0f};
 
-    // One-shots are latched until a sim step consumes them, so a click landing on
-    // a frame with no fixed step is never dropped.
-    void clear_one_shots() { move_requested = false; }
+    bool place_requested = false;
+    Vector2 place_point{0.0f, 0.0f};
+
+    // Fired once per frame (consumed after each substep), so a placement issued on
+    // a frame with no fixed step is held until a step runs, never duplicated.
+    void consume_one_shots() { place_requested = false; }
 };
 
 static void poll_input(Commands& cmds, const Camera2D& camera) {
@@ -40,18 +62,30 @@ static void poll_input(Commands& cmds, const Camera2D& camera) {
         cmds.move_requested = true;
         cmds.move_point = GetScreenToWorld2D(GetMousePosition(), camera);
     }
+    if (IsKeyPressed(KEY_T)) {
+        cmds.place_requested = true;
+        cmds.place_point = GetScreenToWorld2D(GetMousePosition(), camera);
+    }
+}
+
+static void spawn_dummy(World& w, const Vector2 pos) {
+    w.dummies.push_back(Dummy{w.next_id++, pos});
 }
 
 static void step_toward(Champion& c, const Vector2 target, const float dt) {
     c.pos = Vector2MoveTowards(c.pos, target, c.move_speed * dt);
 }
 
-static void update(Champion& champ, const Commands& cmds, const float dt) {
+static void update(World& w, const Commands& cmds, const float dt) {
+    Champion& champ = w.champ;
     champ.prev_pos = champ.pos;
 
     if (cmds.move_requested) {
         champ.order = Champion::Order::MoveToPoint;
         champ.move_point = cmds.move_point;
+    }
+    if (cmds.place_requested) {
+        spawn_dummy(w, cmds.place_point);
     }
 
     if (champ.order == Champion::Order::MoveToPoint) {
@@ -75,6 +109,25 @@ static void draw_grid() {
 
     DrawLineV(Vector2{0.0f, -k_arena_half_extent}, Vector2{0.0f, k_arena_half_extent}, axis_color);
     DrawLineV(Vector2{-k_arena_half_extent, 0.0f}, Vector2{k_arena_half_extent, 0.0f}, axis_color);
+}
+
+static void draw_health_bar(const Vector2 center, const float radius, const float hp,
+                            const float max_hp) {
+    const float bw = 56.0f;
+    const float bh = 7.0f;
+    const float x = center.x - bw * 0.5f;
+    const float y = center.y - radius - 16.0f;
+    const float frac = max_hp > 0.0f ? Clamp(hp / max_hp, 0.0f, 1.0f) : 0.0f;
+
+    DrawRectangleRec(Rectangle{x - 1.0f, y - 1.0f, bw + 2.0f, bh + 2.0f}, Color{0, 0, 0, 180});
+    DrawRectangleRec(Rectangle{x, y, bw, bh}, Color{60, 20, 20, 255});
+    DrawRectangleRec(Rectangle{x, y, bw * frac, bh}, Color{210, 60, 60, 255});
+}
+
+static void draw_dummy(const Dummy& d) {
+    DrawCircleV(d.pos, d.radius, Color{170, 110, 90, 255});
+    DrawCircleLinesV(d.pos, d.radius, Color{230, 180, 160, 255});
+    draw_health_bar(d.pos, d.radius, d.hp, d.max_hp);
 }
 
 // Fill a convex polygon by fanning from p[0]. Each triangle is drawn in both
@@ -134,21 +187,25 @@ static void draw_cursor() {
     DrawLineEx(pts[0], streak_end, 2.5f, accent);
 }
 
-static void render(const Champion& champ, const Camera2D& camera) {
+static void render(const World& w, const Vector2 champ_pos, const Camera2D& camera) {
     BeginDrawing();
     ClearBackground(Color{18, 18, 22, 255});
 
     BeginMode2D(camera);
     draw_grid();
-    if (champ.order == Champion::Order::MoveToPoint) {
-        DrawCircleV(champ.move_point, 5.0f, Color{120, 200, 120, 255});
+    for (const Dummy& d : w.dummies) {
+        draw_dummy(d);
     }
-    DrawCircleV(champ.pos, k_champ_radius, Color{90, 150, 240, 255});
-    DrawCircleLinesV(champ.pos, k_champ_radius, Color{200, 220, 255, 255});
+    if (w.champ.order == Champion::Order::MoveToPoint) {
+        DrawCircleV(w.champ.move_point, 5.0f, Color{120, 200, 120, 255});
+    }
+    DrawCircleV(champ_pos, k_champ_radius, Color{90, 150, 240, 255});
+    DrawCircleLinesV(champ_pos, k_champ_radius, Color{200, 220, 255, 255});
     EndMode2D();
 
     draw_cursor();
     DrawFPS(10, 10);
+    DrawText("Right-click: move    T: place dummy", 10, 35, 20, Color{200, 200, 210, 255});
     EndDrawing();
 }
 
@@ -157,11 +214,11 @@ int main() {
     SetTargetFPS(k_target_fps);
     HideCursor();  // we draw our own cursor in draw_cursor()
 
-    Champion champ{};
+    World world{};
 
     Camera2D camera{};
     camera.offset = Vector2{k_window_size_x / 2.0f, k_window_size_y / 2.0f};
-    camera.target = champ.pos;
+    camera.target = world.champ.pos;
     camera.rotation = 0.0f;
     camera.zoom = 1.0f;
 
@@ -174,22 +231,22 @@ int main() {
 
         bool stepped = false;
         while (acc >= k_dt) {
-            update(champ, cmds, k_dt);
+            update(world, cmds, k_dt);
+            cmds.consume_one_shots();  // one-shots fire once, on the first substep
             acc -= k_dt;
             stepped = true;
         }
         if (stepped) {
-            cmds.clear_one_shots();
+            cmds.move_requested = false;  // movement re-latched each frame while held
         }
 
         // Render interpolation: draw between the last two sim states by how far we
         // are into the next fixed step, so motion is smooth at any render rate.
         const float alpha = acc / k_dt;
-        Champion view = champ;
-        view.pos = Vector2Lerp(champ.prev_pos, champ.pos, alpha);
+        const Vector2 champ_pos = Vector2Lerp(world.champ.prev_pos, world.champ.pos, alpha);
 
-        camera.target = view.pos;
-        render(view, camera);
+        camera.target = champ_pos;
+        render(world, champ_pos, camera);
     }
 
     CloseWindow();
