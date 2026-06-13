@@ -40,6 +40,20 @@ inline constexpr float k_popup_rise = 70.0f;  // upward drift, units/sec
 inline constexpr float k_dummy_radius = 28.0f;
 inline constexpr float k_dummy_hp = 1000.0f;
 
+// 3D presentation. The sim is flat 2D; world (x, y) maps onto the ground as the 3D
+// (x, 0, y) plane, with the 3D Y axis used for height. A fixed tilted camera follows
+// the champion for a League-style top-down perspective.
+inline constexpr float k_champ_height = 72.0f;
+inline constexpr float k_dummy_height = 84.0f;
+inline constexpr float k_wall_height = 140.0f;
+inline constexpr float k_proj_height = 38.0f;
+inline constexpr Vector3 k_cam_offset{0.0f, 1250.0f, 760.0f};
+inline constexpr float k_cam_fovy = 55.0f;
+
+inline constexpr Vector3 to3d(const Vector2 p, const float height) {
+    return Vector3{p.x, height, p.y};
+}
+
 struct Cooldown {
     float remaining = 0.0f;
     float total = 0.0f;
@@ -133,6 +147,7 @@ struct Commands {
     int ignite_target_id = -1;
 
     bool toggle_cooldowns = false;
+    bool reset_requested = false;
 
     // Order latches (move/attack) are re-issued each frame and cleared after the
     // substep loop. One-shots are consumed after each substep so they fire once.
@@ -146,6 +161,7 @@ struct Commands {
         ghost_requested = false;
         ignite_requested = false;
         toggle_cooldowns = false;
+        reset_requested = false;
         attack_move_requested = false;
     }
 };
@@ -191,11 +207,19 @@ static Dummy* nearest_dummy_in_range(World& w, const Vector2 pos, const float ra
     return best;
 }
 
-static void poll_input(const World& w, Commands& cmds, InputState& in, const Camera2D& camera) {
+// Project the mouse cursor onto the ground plane (y = 0), returning world 2D coords.
+static Vector2 mouse_ground(const Camera3D& camera) {
+    const Ray ray = GetScreenToWorldRay(GetMousePosition(), camera);
+    const float t = fabsf(ray.direction.y) > 1e-6f ? -ray.position.y / ray.direction.y : 0.0f;
+    const Vector3 hit = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
+    return Vector2{hit.x, hit.z};
+}
+
+static void poll_input(const World& w, Commands& cmds, InputState& in, const Camera3D& camera) {
     // Hold-to-move (LoL style): while the right button is held, keep re-issuing the
     // order toward the cursor. Right-click on a dummy attacks it; on ground, moves.
     if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
-        const Vector2 wp = GetScreenToWorld2D(GetMousePosition(), camera);
+        const Vector2 wp = mouse_ground(camera);
         const int hit = dummy_at(w, wp);
         if (hit >= 0) {
             cmds.attack_requested = true;
@@ -217,7 +241,7 @@ static void poll_input(const World& w, Commands& cmds, InputState& in, const Cam
         in.attack_move_armed = false;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        const Vector2 wp = GetScreenToWorld2D(GetMousePosition(), camera);
+        const Vector2 wp = mouse_ground(camera);
         if (in.attack_move_armed) {
             cmds.attack_move_requested = true;
             cmds.attack_move_point = wp;
@@ -238,17 +262,20 @@ static void poll_input(const World& w, Commands& cmds, InputState& in, const Cam
 
     if (IsKeyPressed(KEY_T)) {
         cmds.place_requested = true;
-        cmds.place_point = GetScreenToWorld2D(GetMousePosition(), camera);
+        cmds.place_point = mouse_ground(camera);
     }
     if (IsKeyPressed(KEY_D)) {
         cmds.flash_requested = true;
-        cmds.flash_point = GetScreenToWorld2D(GetMousePosition(), camera);
+        cmds.flash_point = mouse_ground(camera);
     }
     if (IsKeyPressed(KEY_F)) {
         cmds.ghost_requested = true;
     }
     if (IsKeyPressed(KEY_N)) {
         cmds.toggle_cooldowns = true;
+    }
+    if (IsKeyPressed(KEY_X)) {
+        cmds.reset_requested = true;
     }
 }
 
@@ -278,7 +305,31 @@ static void step_toward(Champion& c, const Vector2 target, const float dt) {
     c.pos = Vector2MoveTowards(c.pos, target, effective_move_speed(c) * dt);
 }
 
+// Practice reset: refill dummies and clear the champion's transient combat state.
+static void reset_world(World& w) {
+    for (Dummy& d : w.dummies) {
+        d.hp = d.max_hp;
+        d.ignite_left = 0.0f;
+        d.ignite_dps = 0.0f;
+    }
+    w.projectiles.clear();
+    w.popups.clear();
+
+    Champion& c = w.champ;
+    c.order = Champion::Order::Idle;
+    c.target_id = -1;
+    c.windup = 0.0f;
+    c.atk_cooldown = 0.0f;
+    c.ghost_buff = 0.0f;
+    c.flash.remaining = 0.0f;
+    c.ghost.remaining = 0.0f;
+    c.ignite.remaining = 0.0f;
+}
+
 static void apply_commands(World& w, const Commands& cmds) {
+    if (cmds.reset_requested) {
+        reset_world(w);
+    }
     Champion& c = w.champ;
     if (cmds.move_requested) {
         c.order = Champion::Order::MoveToPoint;
@@ -462,8 +513,7 @@ static void effects_system(World& w, const float dt) {
         }
     }
     for (FloatingText& f : w.popups) {
-        f.pos.y -= k_popup_rise * dt;
-        f.life -= dt;
+        f.life -= dt;  // rise is applied in screen space at render time
     }
     std::erase_if(w.popups, [](const FloatingText& f) { return f.life <= 0.0f; });
 }
@@ -480,42 +530,38 @@ static void update(World& w, const Commands& cmds, const float dt) {
     effects_system(w, dt);
 }
 
-static void draw_grid() {
-    const Color line_color{40, 40, 48, 255};
-    const Color axis_color{70, 70, 82, 255};
-
-    for (float x = -k_arena_half_extent; x <= k_arena_half_extent; x += k_grid_spacing) {
-        DrawLineV(Vector2{x, -k_arena_half_extent}, Vector2{x, k_arena_half_extent}, line_color);
-    }
-    for (float y = -k_arena_half_extent; y <= k_arena_half_extent; y += k_grid_spacing) {
-        DrawLineV(Vector2{-k_arena_half_extent, y}, Vector2{k_arena_half_extent, y}, line_color);
-    }
-
-    DrawLineV(Vector2{0.0f, -k_arena_half_extent}, Vector2{0.0f, k_arena_half_extent}, axis_color);
-    DrawLineV(Vector2{-k_arena_half_extent, 0.0f}, Vector2{k_arena_half_extent, 0.0f}, axis_color);
+// A flat ring on the ground plane (range indicators, markers, buff/target rings).
+static void ground_ring(const Vector2 center, const float radius, const Color c) {
+    DrawCircle3D(to3d(center, 0.5f), radius, Vector3{1.0f, 0.0f, 0.0f}, 90.0f, c);
 }
 
-static void draw_health_bar(const Vector2 center, const float radius, const float hp,
-                            const float max_hp) {
+static void draw_ground() {
+    const float extent = k_arena_half_extent * 2.0f;
+    DrawPlane(Vector3{0.0f, -0.5f, 0.0f}, Vector2{extent, extent}, Color{26, 28, 36, 255});
+    DrawGrid(static_cast<int>(extent / k_grid_spacing), k_grid_spacing);
+}
+
+static void draw_dummy_3d(const Dummy& d) {
+    const Vector3 base = to3d(d.pos, 0.0f);
+    DrawCylinder(base, d.radius, d.radius, k_dummy_height, 16, Color{170, 110, 90, 255});
+    DrawCylinderWires(base, d.radius, d.radius, k_dummy_height, 16, Color{230, 180, 160, 255});
+    if (d.ignite_left > 0.0f) {  // burning indicator
+        ground_ring(d.pos, d.radius + 5.0f, Color{240, 140, 40, 255});
+        ground_ring(d.pos, d.radius + 9.0f, Color{220, 90, 30, 255});
+    }
+}
+
+// HP bar drawn in screen space above an entity (its 3D head projected to 2D).
+static void draw_health_bar_screen(const Vector2 sp, const float hp, const float max_hp) {
     const float bw = 56.0f;
     const float bh = 7.0f;
-    const float x = center.x - bw * 0.5f;
-    const float y = center.y - radius - 16.0f;
+    const float x = sp.x - bw * 0.5f;
+    const float y = sp.y;
     const float frac = max_hp > 0.0f ? Clamp(hp / max_hp, 0.0f, 1.0f) : 0.0f;
 
     DrawRectangleRec(Rectangle{x - 1.0f, y - 1.0f, bw + 2.0f, bh + 2.0f}, Color{0, 0, 0, 180});
     DrawRectangleRec(Rectangle{x, y, bw, bh}, Color{60, 20, 20, 255});
     DrawRectangleRec(Rectangle{x, y, bw * frac, bh}, Color{210, 60, 60, 255});
-}
-
-static void draw_dummy(const Dummy& d) {
-    DrawCircleV(d.pos, d.radius, Color{170, 110, 90, 255});
-    DrawCircleLinesV(d.pos, d.radius, Color{230, 180, 160, 255});
-    if (d.ignite_left > 0.0f) {  // burning indicator
-        DrawCircleLinesV(d.pos, d.radius + 5.0f, Color{240, 140, 40, 255});
-        DrawCircleLinesV(d.pos, d.radius + 9.0f, Color{220, 90, 30, 200});
-    }
-    draw_health_bar(d.pos, d.radius, d.hp, d.max_hp);
 }
 
 // Fill a convex polygon by fanning from p[0]. Each triangle is drawn in both
@@ -647,72 +693,80 @@ static void draw_ability_bar(const World& w) {
 
 static void render(const World& w, const Vector2 champ_pos, const float alpha,
                    const bool attack_move_armed, const bool ignite_armed,
-                   const Camera2D& camera) {
+                   const Camera3D& camera) {
     BeginDrawing();
-    ClearBackground(Color{18, 18, 22, 255});
+    ClearBackground(Color{14, 15, 20, 255});
 
-    BeginMode2D(camera);
-    draw_grid();
+    BeginMode3D(camera);
+    draw_ground();
+
     for (const Rectangle& wall : w.walls) {
-        DrawRectangleRec(wall, Color{55, 58, 70, 255});
-        DrawRectangleLinesEx(wall, 2.0f, Color{95, 100, 120, 255});
-    }
-    for (const Dummy& d : w.dummies) {
-        draw_dummy(d);
+        const Vector3 center{wall.x + wall.width * 0.5f, k_wall_height * 0.5f,
+                             wall.y + wall.height * 0.5f};
+        DrawCube(center, wall.width, k_wall_height, wall.height, Color{55, 58, 70, 255});
+        DrawCubeWires(center, wall.width, k_wall_height, wall.height, Color{95, 100, 120, 255});
     }
 
-    // Attack-range indicator around the champion.
-    DrawCircleLinesV(champ_pos, w.champ.attack_range, Color{80, 110, 150, 110});
-
-    // Highlight the current attack target (explicit or auto-acquired).
+    // Ground rings: attack range, order markers, target highlight, ghost buff.
+    ground_ring(champ_pos, w.champ.attack_range, Color{80, 110, 150, 160});
+    if (w.champ.order == Champion::Order::MoveToPoint) {
+        ground_ring(w.champ.move_point, 12.0f, Color{120, 200, 120, 255});
+    }
+    if (w.champ.order == Champion::Order::AttackMove) {
+        ground_ring(w.champ.move_point, 12.0f, Color{235, 100, 90, 255});
+    }
     if (w.champ.order == Champion::Order::AttackTarget ||
         w.champ.order == Champion::Order::AttackMove) {
         for (const Dummy& d : w.dummies) {
             if (d.id == w.champ.target_id) {
-                DrawCircleLinesV(d.pos, d.radius + 6.0f, Color{240, 210, 80, 255});
+                ground_ring(d.pos, d.radius + 6.0f, Color{240, 210, 80, 255});
                 break;
             }
         }
     }
-    if (w.champ.order == Champion::Order::MoveToPoint) {
-        DrawCircleV(w.champ.move_point, 5.0f, Color{120, 200, 120, 255});
-    }
-    if (w.champ.order == Champion::Order::AttackMove) {
-        DrawCircleV(w.champ.move_point, 5.0f, Color{235, 100, 90, 255});
+    if (w.champ.ghost_buff > 0.0f) {
+        ground_ring(champ_pos, k_champ_radius + 8.0f, Color{120, 240, 150, 255});
     }
 
-    // Champion turns gold while winding up an attack (locked in place).
+    for (const Dummy& d : w.dummies) {
+        draw_dummy_3d(d);
+    }
+
+    // Champion: a cylinder that turns gold while winding up an attack.
+    const Vector3 champ_base = to3d(champ_pos, 0.0f);
     const Color champ_fill =
         w.champ.windup > 0.0f ? Color{230, 200, 90, 255} : Color{90, 150, 240, 255};
-    DrawCircleV(champ_pos, k_champ_radius, champ_fill);
-    DrawCircleLinesV(champ_pos, k_champ_radius, Color{200, 220, 255, 255});
+    DrawCylinder(champ_base, k_champ_radius, k_champ_radius, k_champ_height, 20, champ_fill);
+    DrawCylinderWires(champ_base, k_champ_radius, k_champ_radius, k_champ_height, 20,
+                      Color{200, 220, 255, 255});
 
-    // Ghost buff: a green speed ring around the champion.
-    if (w.champ.ghost_buff > 0.0f) {
-        DrawCircleLinesV(champ_pos, k_champ_radius + 6.0f, Color{120, 240, 150, 255});
-    }
-
-    // Projectiles (interpolated for smoothness at high frame rates).
+    // Projectiles (interpolated), drawn as airborne spheres.
     for (const Projectile& p : w.projectiles) {
         const Vector2 pp = Vector2Lerp(p.prev_pos, p.pos, alpha);
-        DrawCircleV(pp, k_projectile_radius, Color{250, 230, 140, 255});
-        DrawCircleLinesV(pp, k_projectile_radius, Color{255, 255, 220, 255});
+        DrawSphere(to3d(pp, k_proj_height), k_projectile_radius, Color{250, 230, 140, 255});
     }
+    EndMode3D();
 
-    // Floating damage numbers.
-    for (const FloatingText& f : w.popups) {
-        const unsigned char a = static_cast<unsigned char>(Clamp(f.life / k_popup_life, 0.0f, 1.0f) * 255.0f);
-        DrawText(TextFormat("%.0f", static_cast<double>(f.value)), static_cast<int>(f.pos.x) - 14,
-                 static_cast<int>(f.pos.y) - 40, 24, Color{255, 240, 160, a});
+    // Screen-space billboards: HP bars above dummies, floating damage numbers.
+    for (const Dummy& d : w.dummies) {
+        const Vector2 sp = GetWorldToScreen(to3d(d.pos, k_dummy_height + 34.0f), camera);
+        draw_health_bar_screen(sp, d.hp, d.max_hp);
     }
-    EndMode2D();
+    for (const FloatingText& f : w.popups) {
+        const Vector2 sp = GetWorldToScreen(to3d(f.pos, k_dummy_height * 0.6f), camera);
+        const float rise = (k_popup_life - f.life) * k_popup_rise;
+        const unsigned char a =
+            static_cast<unsigned char>(Clamp(f.life / k_popup_life, 0.0f, 1.0f) * 255.0f);
+        DrawText(TextFormat("%.0f", static_cast<double>(f.value)), static_cast<int>(sp.x) - 14,
+                 static_cast<int>(sp.y - rise), 24, Color{255, 240, 160, a});
+    }
 
     draw_ability_bar(w);
 
     draw_cursor(attack_move_armed, ignite_armed);
     DrawFPS(10, 10);
     DrawText(
-        "RMB: move/attack   A+LMB: attack-move   R+LMB: ignite   T: dummy   D: flash   F: ghost   N: no-cd",
+        "RMB: move/attack  A+LMB: attack-move  R+LMB: ignite  T: dummy  D: flash  F: ghost  N: no-cd  X: reset",
         10, 35, 20, Color{200, 200, 210, 255});
     EndDrawing();
 }
@@ -727,11 +781,13 @@ int main() {
     world.walls.push_back(Rectangle{-560.0f, 220.0f, 380.0f, 70.0f});
     world.walls.push_back(Rectangle{-600.0f, -380.0f, 70.0f, 320.0f});
 
-    Camera2D camera{};
-    camera.offset = Vector2{k_window_size_x / 2.0f, k_window_size_y / 2.0f};
-    camera.target = world.champ.pos;
-    camera.rotation = 0.0f;
-    camera.zoom = 1.0f;
+    Camera3D camera{};
+    camera.up = Vector3{0.0f, 1.0f, 0.0f};
+    camera.fovy = k_cam_fovy;
+    camera.projection = CAMERA_PERSPECTIVE;
+    const Vector3 champ_start = to3d(world.champ.pos, 0.0f);
+    camera.target = champ_start;
+    camera.position = Vector3Add(champ_start, k_cam_offset);
 
     Commands cmds{};
     InputState input{};
@@ -757,7 +813,9 @@ int main() {
         const float alpha = acc / k_dt;
         const Vector2 champ_pos = Vector2Lerp(world.champ.prev_pos, world.champ.pos, alpha);
 
-        camera.target = champ_pos;
+        const Vector3 champ3 = to3d(champ_pos, 0.0f);
+        camera.target = champ3;
+        camera.position = Vector3Add(champ3, k_cam_offset);
         render(world, champ_pos, alpha, input.attack_move_armed, input.ignite_armed, camera);
     }
 
