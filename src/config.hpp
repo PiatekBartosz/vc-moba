@@ -27,9 +27,31 @@ inline constexpr float k_flash_cd = 300.0f;
 inline constexpr float k_ghost_bonus = 0.30f;  // +30% move speed
 inline constexpr float k_ghost_duration = 10.0f;
 inline constexpr float k_ghost_cd = 210.0f;
-inline constexpr float k_ignite_dps = 50.0f;
+inline constexpr float k_ignite_dps = 50.0f;  // ignite kept in code but currently unbound
 inline constexpr float k_ignite_duration = 5.0f;
 inline constexpr float k_ignite_cd = 180.0f;
+
+// Vayne kit ------------------------------------------------------------------
+// Q - Tumble: short dash + auto-attack reset, next auto deals bonus AD.
+inline constexpr float k_q_dash = 320.0f;
+inline constexpr float k_q_dash_duration = 0.27f;  // roll travel time
+inline constexpr float k_q_cd = 5.0f;
+inline constexpr float k_q_bonus_ad = 55.0f;
+// W - Silver Bolts: every 3rd consecutive hit on a target deals % max-HP true dmg.
+inline constexpr int k_silverbolts_stacks = 3;
+inline constexpr float k_silverbolts_percent = 0.08f;
+inline constexpr float k_silverbolts_duration = 4.0f;  // stacks expire if the target isn't hit
+// E - Condemn: knock the target back; stun + bonus damage if it hits a wall.
+inline constexpr float k_condemn_cd = 16.0f;
+inline constexpr float k_condemn_knockback = 330.0f;
+inline constexpr float k_condemn_speed = 1500.0f;
+inline constexpr float k_condemn_wall_damage = 130.0f;
+inline constexpr float k_condemn_stun = 1.6f;
+// R - Final Hour: bonus AD for a duration; stealth on cast / on Tumble during it.
+inline constexpr float k_ult_cd = 70.0f;
+inline constexpr float k_ult_duration = 8.0f;
+inline constexpr float k_ult_bonus_ad = 45.0f;
+inline constexpr float k_ult_stealth = 1.5f;
 
 inline constexpr float k_projectile_speed = 1800.0f;
 inline constexpr float k_projectile_radius = 7.0f;

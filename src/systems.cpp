@@ -41,6 +41,28 @@ static Dummy* nearest_dummy_in_range(World& w, const Vector2 pos, const float ra
     return best;
 }
 
+// Attack-move acquisition (LoL style): among living dummies within attack range of
+// the champion, pick the one closest to the cursor/click point.
+static Dummy* acquire_toward_cursor(World& w, const Vector2 champ_pos, const Vector2 cursor,
+                                    const float range) {
+    Dummy* best = nullptr;
+    float best_to_cursor = 1e30f;
+    for (Dummy& d : w.dummies) {
+        if (d.hp <= 0.0f) {
+            continue;
+        }
+        if (Vector2Distance(champ_pos, d.pos) > range) {
+            continue;  // must be attackable
+        }
+        const float to_cursor = Vector2Distance(cursor, d.pos);
+        if (to_cursor < best_to_cursor) {
+            best_to_cursor = to_cursor;
+            best = &d;
+        }
+    }
+    return best;
+}
+
 static void spawn_dummy(World& w, const Vector2 pos) {
     w.dummies.push_back(Dummy{w.next_id++, pos});
 }
@@ -73,6 +95,9 @@ static void reset_world(World& w) {
         d.hp = d.max_hp;
         d.ignite_left = 0.0f;
         d.ignite_dps = 0.0f;
+        d.knock_left = 0.0f;
+        d.stun_left = 0.0f;
+        d.knock_vel = Vector2{0.0f, 0.0f};
     }
     w.projectiles.clear();
     w.popups.clear();
@@ -83,9 +108,20 @@ static void reset_world(World& w) {
     c.windup = 0.0f;
     c.atk_cooldown = 0.0f;
     c.ghost_buff = 0.0f;
+    c.dash_left = 0.0f;
+    c.dash_vel = Vector2{0.0f, 0.0f};
+    c.q_empowered = false;
+    c.ult_left = 0.0f;
+    c.stealth_left = 0.0f;
+    c.sb_target_id = -1;
+    c.sb_stacks = 0;
+    c.sb_timer = 0.0f;
     c.flash.remaining = 0.0f;
     c.ghost.remaining = 0.0f;
     c.ignite.remaining = 0.0f;
+    c.tumble.remaining = 0.0f;
+    c.condemn.remaining = 0.0f;
+    c.ult.remaining = 0.0f;
 }
 
 static void apply_commands(World& w, const Commands& cmds) {
@@ -117,6 +153,15 @@ static void abilities_system(World& w, const Commands& cmds, const float dt) {
     c.flash.tick(dt);
     c.ghost.tick(dt);
     c.ignite.tick(dt);
+    c.tumble.tick(dt);
+    c.condemn.tick(dt);
+    c.ult.tick(dt);
+    if (c.ult_left > 0.0f) {
+        c.ult_left -= dt;
+    }
+    if (c.stealth_left > 0.0f) {
+        c.stealth_left -= dt;
+    }
 
     if (cmds.toggle_cooldowns) {
         w.cooldowns_enabled = !w.cooldowns_enabled;
@@ -151,9 +196,68 @@ static void abilities_system(World& w, const Commands& cmds, const float dt) {
             }
         }
     }
+
+    // Q - Tumble: a timed roll toward the cursor + auto-attack reset; next auto bonus AD.
+    if (cmds.q_requested && (!w.cooldowns_enabled || c.tumble.ready())) {
+        Vector2 dir = Vector2Subtract(cmds.q_point, c.pos);
+        const float dist = Vector2Length(dir);
+        dir = dist > 0.001f ? Vector2Scale(dir, 1.0f / dist) : Vector2{0.0f, 1.0f};
+        const float roll_dist = fminf(dist, k_q_dash);
+        c.dash_vel = Vector2Scale(dir, roll_dist / k_q_dash_duration);
+        c.dash_left = k_q_dash_duration;
+        c.atk_cooldown = 0.0f;  // auto-attack reset
+        c.windup = 0.0f;
+        c.q_empowered = true;
+        if (c.ult_left > 0.0f) {
+            c.stealth_left = fmaxf(c.stealth_left, k_ult_stealth);  // stealth on Tumble during R
+        }
+        if (w.cooldowns_enabled) {
+            c.tumble.trigger();
+        }
+    }
+
+    // E - Condemn: knock the current/nearest target back (wall slam resolved later).
+    if (cmds.e_requested && (!w.cooldowns_enabled || c.condemn.ready())) {
+        Dummy* t = find_dummy(w, c.target_id);
+        if (t == nullptr || t->hp <= 0.0f) {
+            t = nearest_dummy_in_range(w, c.pos, c.attack_range);
+        }
+        if (t != nullptr) {
+            Vector2 dir = Vector2Subtract(t->pos, c.pos);
+            if (Vector2Length(dir) < 0.001f) {
+                dir = Vector2{0.0f, 1.0f};
+            }
+            t->knock_vel = Vector2Scale(Vector2Normalize(dir), k_condemn_speed);
+            t->knock_left = k_condemn_knockback / k_condemn_speed;
+            if (w.cooldowns_enabled) {
+                c.condemn.trigger();
+            }
+        }
+    }
+
+    // R - Final Hour: bonus AD for a duration + brief stealth on cast.
+    if (cmds.ult_requested && (!w.cooldowns_enabled || c.ult.ready())) {
+        c.ult_left = k_ult_duration;
+        c.stealth_left = k_ult_stealth;
+        if (w.cooldowns_enabled) {
+            c.ult.trigger();
+        }
+    }
+}
+
+// Tumble roll: drives the champion along the dash velocity for its duration.
+static void dash_system(Champion& c, const float dt) {
+    if (c.dash_left <= 0.0f) {
+        return;
+    }
+    c.pos = Vector2Add(c.pos, Vector2Scale(c.dash_vel, dt));
+    c.dash_left -= dt;
 }
 
 static void movement_system(Champion& c, const float dt) {
+    if (c.dash_left > 0.0f) {
+        return;  // rolling overrides ordinary movement
+    }
     if (c.order != Champion::Order::MoveToPoint) {
         return;
     }
@@ -172,9 +276,21 @@ static void combat_system(World& w, const float dt) {
     if (c.windup > 0.0f) {  // committed; locked in place until the damage point
         c.windup -= dt;
         if (c.windup <= 0.0f) {
-            spawn_projectile(w, c.target_id, c.atk_damage);  // damage point
+            float dmg = c.atk_damage;
+            if (c.ult_left > 0.0f) {
+                dmg += k_ult_bonus_ad;  // Final Hour bonus AD
+            }
+            if (c.q_empowered) {
+                dmg += k_q_bonus_ad;  // Tumble empowered auto
+                c.q_empowered = false;
+            }
+            spawn_projectile(w, c.target_id, dmg);  // damage point
         }
         return;
+    }
+
+    if (c.dash_left > 0.0f) {
+        return;  // rolling: don't chase or start a new attack mid-roll
     }
 
     Dummy* t = nullptr;
@@ -185,7 +301,7 @@ static void combat_system(World& w, const float dt) {
             return;
         }
     } else if (c.order == Champion::Order::AttackMove) {
-        t = nearest_dummy_in_range(w, c.pos, c.attack_range);
+        t = acquire_toward_cursor(w, c.pos, c.move_point, c.attack_range);
         c.target_id = t != nullptr ? t->id : -1;
     } else {
         return;
@@ -245,6 +361,35 @@ static void collision_system(World& w) {
     }
 }
 
+// Condemn knockback: shove a target along its knock velocity each step; a wall slam
+// stuns it and deals bonus damage, then stops the knockback.
+static void knockback_system(World& w, const float dt) {
+    for (Dummy& d : w.dummies) {
+        if (d.stun_left > 0.0f) {
+            d.stun_left -= dt;
+        }
+        if (d.knock_left <= 0.0f) {
+            continue;
+        }
+        d.pos = Vector2Add(d.pos, Vector2Scale(d.knock_vel, dt));
+        d.knock_left -= dt;
+        for (const Rectangle& wall : w.walls) {
+            const Vector2 closest{Clamp(d.pos.x, wall.x, wall.x + wall.width),
+                                  Clamp(d.pos.y, wall.y, wall.y + wall.height)};
+            const Vector2 delta = Vector2Subtract(d.pos, closest);
+            if (Vector2Length(delta) < d.radius) {
+                apply_damage(w, d, k_condemn_wall_damage);
+                d.stun_left = k_condemn_stun;
+                d.knock_left = 0.0f;
+                if (Vector2Length(delta) > 0.001f) {
+                    d.pos = Vector2Add(closest, Vector2Scale(Vector2Normalize(delta), d.radius));
+                }
+                break;
+            }
+        }
+    }
+}
+
 // Homing projectiles advance toward their target and apply damage on contact.
 static void projectile_system(World& w, const float dt) {
     for (Projectile& p : w.projectiles) {
@@ -257,6 +402,19 @@ static void projectile_system(World& w, const float dt) {
         p.pos = Vector2MoveTowards(p.pos, t->pos, p.speed * dt);
         if (Vector2Distance(p.pos, t->pos) < k_hit_distance) {
             apply_damage(w, *t, p.dmg);
+            // W - Silver Bolts: every 3rd consecutive hit on a target adds % max-HP true dmg.
+            Champion& c = w.champ;
+            if (c.sb_target_id == t->id) {
+                c.sb_stacks += 1;
+            } else {
+                c.sb_target_id = t->id;  // stacks live on a single target
+                c.sb_stacks = 1;
+            }
+            c.sb_timer = k_silverbolts_duration;  // refresh the stack timer
+            if (c.sb_stacks >= k_silverbolts_stacks) {
+                apply_damage(w, *t, t->max_hp * k_silverbolts_percent);
+                c.sb_stacks = 0;
+            }
             p.live = false;
         }
     }
@@ -267,6 +425,13 @@ static void projectile_system(World& w, const float dt) {
 static void effects_system(World& w, const float dt) {
     if (w.champ.ghost_buff > 0.0f) {
         w.champ.ghost_buff -= dt;
+    }
+    if (w.champ.sb_timer > 0.0f) {  // Silver Bolts stacks decay if the target isn't hit
+        w.champ.sb_timer -= dt;
+        if (w.champ.sb_timer <= 0.0f) {
+            w.champ.sb_stacks = 0;
+            w.champ.sb_target_id = -1;
+        }
     }
     for (Dummy& d : w.dummies) {
         if (d.ignite_left > 0.0f) {
@@ -285,9 +450,11 @@ void update(World& w, const Commands& cmds, const float dt) {
 
     apply_commands(w, cmds);
     abilities_system(w, cmds, dt);
+    dash_system(w.champ, dt);
     movement_system(w.champ, dt);
     combat_system(w, dt);
     collision_system(w);
+    knockback_system(w, dt);
     projectile_system(w, dt);
     effects_system(w, dt);
 }

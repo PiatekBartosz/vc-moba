@@ -27,34 +27,29 @@ void poll_input(const World& w, Commands& cmds, InputState& in, const Camera3D& 
         }
     }
 
-    // Targeting modes: press A (attack-move) or R (ignite) to arm, then left-click.
-    // Arming is mutually exclusive; right-click / Esc cancels.
+    // Attack-move: press A to arm, then left-click a point. Right-click / Esc cancels.
     if (IsKeyPressed(KEY_A)) {
         in.attack_move_armed = true;
-        in.ignite_armed = false;
     }
-    if (IsKeyPressed(KEY_R)) {
-        in.ignite_armed = true;
+    if (in.attack_move_armed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        cmds.attack_move_requested = true;
+        cmds.attack_move_point = mouse_ground(camera);
         in.attack_move_armed = false;
-    }
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        const Vector2 wp = mouse_ground(camera);
-        if (in.attack_move_armed) {
-            cmds.attack_move_requested = true;
-            cmds.attack_move_point = wp;
-        } else if (in.ignite_armed) {
-            const int hit = dummy_at(w, wp);
-            if (hit >= 0) {
-                cmds.ignite_requested = true;
-                cmds.ignite_target_id = hit;
-            }
-        }
-        in.attack_move_armed = false;
-        in.ignite_armed = false;  // a left-click resolves (or wastes) the armed mode
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsKeyPressed(KEY_ESCAPE)) {
         in.attack_move_armed = false;
-        in.ignite_armed = false;
+    }
+
+    // Vayne abilities.
+    if (IsKeyPressed(KEY_Q)) {
+        cmds.q_requested = true;
+        cmds.q_point = mouse_ground(camera);
+    }
+    if (IsKeyPressed(KEY_E)) {
+        cmds.e_requested = true;
+    }
+    if (IsKeyPressed(KEY_R)) {
+        cmds.ult_requested = true;
     }
 
     if (IsKeyPressed(KEY_T)) {

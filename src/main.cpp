@@ -14,9 +14,18 @@ int main() {
     HideCursor();  // we draw our own cursor in the renderer
 
     World world{};
-    world.walls.push_back(Rectangle{300.0f, -180.0f, 70.0f, 360.0f});  // flash over this
-    world.walls.push_back(Rectangle{-560.0f, 220.0f, 380.0f, 70.0f});
-    world.walls.push_back(Rectangle{-600.0f, -380.0f, 70.0f, 320.0f});
+    // Jungle rock walls, laid out with 180-degree rotational symmetry like the Rift.
+    // Each call adds a wall and its mirror through the map center.
+    const auto add_wall_pair = [&world](float x, float z, float w, float d) {
+        world.walls.push_back(Rectangle{x, z, w, d});
+        world.walls.push_back(Rectangle{-(x + w), -(z + d), w, d});
+    };
+    add_wall_pair(-1560.0f, 640.0f, 110.0f, 460.0f);   // outer jungle wall by blue base
+    add_wall_pair(-1320.0f, 1180.0f, 430.0f, 110.0f);  // base mouth
+    add_wall_pair(-980.0f, 690.0f, 110.0f, 330.0f);    // raptors/wolf divider
+    add_wall_pair(-560.0f, 1120.0f, 360.0f, 110.0f);   // wall toward bot lane
+    add_wall_pair(-1180.0f, 200.0f, 110.0f, 320.0f);   // wall near river
+    add_wall_pair(-470.0f, 470.0f, 300.0f, 110.0f);    // mid-lane jungle flank
 
     Camera3D camera{};
     camera.up = Vector3{0.0f, 1.0f, 0.0f};

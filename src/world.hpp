@@ -39,9 +39,22 @@ struct Champion {
     float windup = 0.0f;        // >0 == mid-attack; damage point is when it reaches 0
     float ghost_buff = 0.0f;    // seconds of move-speed buff remaining
 
+    // Vayne kit state.
+    float dash_left = 0.0f;     // Tumble roll time remaining (>0 == mid-roll)
+    Vector2 dash_vel{0.0f, 0.0f};
+    bool q_empowered = false;  // next auto deals Tumble bonus AD
+    float ult_left = 0.0f;     // Final Hour duration remaining (bonus AD while > 0)
+    float stealth_left = 0.0f;  // invisibility remaining
+    int sb_target_id = -1;     // Silver Bolts: the single stacked target
+    int sb_stacks = 0;         // Silver Bolts: consecutive hits on that target
+    float sb_timer = 0.0f;     // Silver Bolts: time until stacks expire
+
     Cooldown flash{0.0f, k_flash_cd};
     Cooldown ghost{0.0f, k_ghost_cd};
     Cooldown ignite{0.0f, k_ignite_cd};
+    Cooldown tumble{0.0f, k_q_cd};
+    Cooldown condemn{0.0f, k_condemn_cd};
+    Cooldown ult{0.0f, k_ult_cd};
 };
 
 struct Dummy {
@@ -52,6 +65,9 @@ struct Dummy {
     float max_hp = k_dummy_hp;
     float ignite_left = 0.0f;  // seconds of ignite DoT remaining
     float ignite_dps = 0.0f;
+    Vector2 knock_vel{0.0f, 0.0f};  // Condemn knockback velocity
+    float knock_left = 0.0f;        // knockback time remaining
+    float stun_left = 0.0f;         // stun remaining (cosmetic; dummies don't act)
 };
 
 struct Projectile {

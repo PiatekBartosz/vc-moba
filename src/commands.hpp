@@ -22,8 +22,13 @@ struct Commands {
 
     bool ghost_requested = false;
 
-    bool ignite_requested = false;
+    bool ignite_requested = false;  // kept but currently unbound
     int ignite_target_id = -1;
+
+    bool q_requested = false;  // Tumble
+    Vector2 q_point{0.0f, 0.0f};
+    bool e_requested = false;  // Condemn
+    bool ult_requested = false;  // Final Hour
 
     bool toggle_cooldowns = false;
     bool reset_requested = false;
@@ -39,6 +44,9 @@ struct Commands {
         flash_requested = false;
         ghost_requested = false;
         ignite_requested = false;
+        q_requested = false;
+        e_requested = false;
+        ult_requested = false;
         toggle_cooldowns = false;
         reset_requested = false;
         attack_move_requested = false;
