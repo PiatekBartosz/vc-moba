@@ -16,6 +16,11 @@ inline constexpr float k_move_speed = 340.0f;
 inline constexpr float k_champ_radius = 24.0f;
 inline constexpr float k_arrive_epsilon = 1.0f;
 
+inline constexpr float k_attack_range = 550.0f;
+inline constexpr float k_attacks_per_sec = 0.8f;
+inline constexpr float k_attack_damage = 60.0f;
+inline constexpr float k_windup_fraction = 0.3f;  // share of the attack cycle spent winding up
+
 inline constexpr float k_dummy_radius = 28.0f;
 inline constexpr float k_dummy_hp = 1000.0f;
 
@@ -24,9 +29,17 @@ struct Champion {
     Vector2 prev_pos{0.0f, 0.0f};  // sim position one step ago, for render interpolation
     float move_speed = k_move_speed;
 
-    enum class Order { Idle, MoveToPoint };
+    float attack_range = k_attack_range;
+    float attacks_per_sec = k_attacks_per_sec;
+    float atk_damage = k_attack_damage;
+
+    enum class Order { Idle, MoveToPoint, AttackTarget };
     Order order = Order::Idle;
     Vector2 move_point{0.0f, 0.0f};
+    int target_id = -1;
+
+    float atk_cooldown = 0.0f;  // time until the next attack is allowed
+    float windup = 0.0f;        // >0 == mid-attack; damage point is when it reaches 0
 };
 
 struct Dummy {
@@ -47,20 +60,52 @@ struct Commands {
     bool move_requested = false;
     Vector2 move_point{0.0f, 0.0f};
 
+    bool attack_requested = false;
+    int attack_target_id = -1;
+
     bool place_requested = false;
     Vector2 place_point{0.0f, 0.0f};
 
-    // Fired once per frame (consumed after each substep), so a placement issued on
-    // a frame with no fixed step is held until a step runs, never duplicated.
+    // Order latches (move/attack) are re-issued each frame and cleared after the
+    // substep loop. One-shots are consumed after each substep so they fire once.
+    void clear_orders() {
+        move_requested = false;
+        attack_requested = false;
+    }
     void consume_one_shots() { place_requested = false; }
 };
 
-static void poll_input(Commands& cmds, const Camera2D& camera) {
+static int dummy_at(const World& w, const Vector2 p) {
+    for (const Dummy& d : w.dummies) {
+        if (Vector2Distance(p, d.pos) <= d.radius) {
+            return d.id;
+        }
+    }
+    return -1;
+}
+
+static Dummy* find_dummy(World& w, const int id) {
+    for (Dummy& d : w.dummies) {
+        if (d.id == id) {
+            return &d;
+        }
+    }
+    return nullptr;
+}
+
+static void poll_input(const World& w, Commands& cmds, const Camera2D& camera) {
     // Hold-to-move (LoL style): while the right button is held, keep re-issuing the
-    // move order toward the cursor. A single tap still works; holding makes it robust.
+    // order toward the cursor. Right-click on a dummy attacks it; on ground, moves.
     if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
-        cmds.move_requested = true;
-        cmds.move_point = GetScreenToWorld2D(GetMousePosition(), camera);
+        const Vector2 wp = GetScreenToWorld2D(GetMousePosition(), camera);
+        const int hit = dummy_at(w, wp);
+        if (hit >= 0) {
+            cmds.attack_requested = true;
+            cmds.attack_target_id = hit;
+        } else {
+            cmds.move_requested = true;
+            cmds.move_point = wp;
+        }
     }
     if (IsKeyPressed(KEY_T)) {
         cmds.place_requested = true;
@@ -76,24 +121,69 @@ static void step_toward(Champion& c, const Vector2 target, const float dt) {
     c.pos = Vector2MoveTowards(c.pos, target, c.move_speed * dt);
 }
 
-static void update(World& w, const Commands& cmds, const float dt) {
-    Champion& champ = w.champ;
-    champ.prev_pos = champ.pos;
-
+static void apply_commands(World& w, const Commands& cmds) {
+    Champion& c = w.champ;
     if (cmds.move_requested) {
-        champ.order = Champion::Order::MoveToPoint;
-        champ.move_point = cmds.move_point;
+        c.order = Champion::Order::MoveToPoint;
+        c.move_point = cmds.move_point;
+        c.windup = 0.0f;  // moving before the damage point cancels the wind-up
+    }
+    if (cmds.attack_requested) {
+        c.order = Champion::Order::AttackTarget;
+        c.target_id = cmds.attack_target_id;
     }
     if (cmds.place_requested) {
         spawn_dummy(w, cmds.place_point);
     }
+}
 
-    if (champ.order == Champion::Order::MoveToPoint) {
-        step_toward(champ, champ.move_point, dt);
-        if (Vector2Distance(champ.pos, champ.move_point) <= k_arrive_epsilon) {
-            champ.order = Champion::Order::Idle;
-        }
+static void movement_system(Champion& c, const float dt) {
+    if (c.order != Champion::Order::MoveToPoint) {
+        return;
     }
+    step_toward(c, c.move_point, dt);
+    if (Vector2Distance(c.pos, c.move_point) <= k_arrive_epsilon) {
+        c.order = Champion::Order::Idle;
+    }
+}
+
+// Auto-attack state machine (chase -> windup -> damage point). See spec section 6.
+static void combat_system(World& w, const float dt) {
+    Champion& c = w.champ;
+    c.atk_cooldown -= dt;
+
+    if (c.windup > 0.0f) {  // committed; locked in place until the damage point
+        c.windup -= dt;
+        if (c.windup <= 0.0f) {
+            // Damage point reached. Projectile spawning comes in the next step.
+        }
+        return;
+    }
+
+    if (c.order != Champion::Order::AttackTarget) {
+        return;
+    }
+    Dummy* t = find_dummy(w, c.target_id);
+    if (t == nullptr) {
+        c.order = Champion::Order::Idle;
+        return;
+    }
+
+    const float d = Vector2Distance(c.pos, t->pos);
+    if (d > c.attack_range) {
+        step_toward(c, t->pos, dt);  // chase into range
+    } else if (c.atk_cooldown <= 0.0f) {
+        c.windup = k_windup_fraction / c.attacks_per_sec;  // begin the attack
+        c.atk_cooldown = 1.0f / c.attacks_per_sec;
+    }
+}
+
+static void update(World& w, const Commands& cmds, const float dt) {
+    w.champ.prev_pos = w.champ.pos;
+
+    apply_commands(w, cmds);
+    movement_system(w.champ, dt);
+    combat_system(w, dt);
 }
 
 static void draw_grid() {
@@ -196,16 +286,34 @@ static void render(const World& w, const Vector2 champ_pos, const Camera2D& came
     for (const Dummy& d : w.dummies) {
         draw_dummy(d);
     }
+
+    // Attack-range indicator around the champion.
+    DrawCircleLinesV(champ_pos, w.champ.attack_range, Color{80, 110, 150, 110});
+
+    // Highlight the current attack target.
+    if (w.champ.order == Champion::Order::AttackTarget) {
+        for (const Dummy& d : w.dummies) {
+            if (d.id == w.champ.target_id) {
+                DrawCircleLinesV(d.pos, d.radius + 6.0f, Color{240, 210, 80, 255});
+                break;
+            }
+        }
+    }
     if (w.champ.order == Champion::Order::MoveToPoint) {
         DrawCircleV(w.champ.move_point, 5.0f, Color{120, 200, 120, 255});
     }
-    DrawCircleV(champ_pos, k_champ_radius, Color{90, 150, 240, 255});
+
+    // Champion turns gold while winding up an attack (locked in place).
+    const Color champ_fill =
+        w.champ.windup > 0.0f ? Color{230, 200, 90, 255} : Color{90, 150, 240, 255};
+    DrawCircleV(champ_pos, k_champ_radius, champ_fill);
     DrawCircleLinesV(champ_pos, k_champ_radius, Color{200, 220, 255, 255});
     EndMode2D();
 
     draw_cursor();
     DrawFPS(10, 10);
-    DrawText("Right-click: move    T: place dummy", 10, 35, 20, Color{200, 200, 210, 255});
+    DrawText("Right-click: move / attack dummy    T: place dummy", 10, 35, 20,
+             Color{200, 200, 210, 255});
     EndDrawing();
 }
 
@@ -227,7 +335,7 @@ int main() {
     while (!WindowShouldClose()) {
         // Clamp to avoid a spiral of death if a frame hitches (e.g. window drag).
         acc += fminf(GetFrameTime(), 0.25f);
-        poll_input(cmds, camera);
+        poll_input(world, cmds, camera);
 
         bool stepped = false;
         while (acc >= k_dt) {
@@ -237,7 +345,7 @@ int main() {
             stepped = true;
         }
         if (stepped) {
-            cmds.move_requested = false;  // movement re-latched each frame while held
+            cmds.clear_orders();  // move/attack orders are re-latched each frame while held
         }
 
         // Render interpolation: draw between the last two sim states by how far we
