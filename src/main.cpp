@@ -17,9 +17,16 @@ inline constexpr float k_champ_radius = 24.0f;
 inline constexpr float k_arrive_epsilon = 1.0f;
 
 inline constexpr float k_attack_range = 550.0f;
-inline constexpr float k_attacks_per_sec = 0.8f;
+inline constexpr float k_attacks_per_sec = 1.6f;
 inline constexpr float k_attack_damage = 60.0f;
 inline constexpr float k_windup_fraction = 0.3f;  // share of the attack cycle spent winding up
+
+inline constexpr float k_projectile_speed = 1800.0f;
+inline constexpr float k_projectile_radius = 7.0f;
+inline constexpr float k_hit_distance = 6.0f;
+
+inline constexpr float k_popup_life = 0.8f;
+inline constexpr float k_popup_rise = 70.0f;  // upward drift, units/sec
 
 inline constexpr float k_dummy_radius = 28.0f;
 inline constexpr float k_dummy_hp = 1000.0f;
@@ -50,9 +57,26 @@ struct Dummy {
     float max_hp = k_dummy_hp;
 };
 
+struct Projectile {
+    Vector2 pos{0.0f, 0.0f};
+    Vector2 prev_pos{0.0f, 0.0f};  // for render interpolation
+    int target_id = -1;
+    float speed = k_projectile_speed;
+    float dmg = 0.0f;
+    bool live = true;
+};
+
+struct FloatingText {
+    Vector2 pos{0.0f, 0.0f};
+    float value = 0.0f;
+    float life = k_popup_life;
+};
+
 struct World {
     Champion champ;
     std::vector<Dummy> dummies;
+    std::vector<Projectile> projectiles;
+    std::vector<FloatingText> popups;
     int next_id = 0;
 };
 
@@ -117,6 +141,20 @@ static void spawn_dummy(World& w, const Vector2 pos) {
     w.dummies.push_back(Dummy{w.next_id++, pos});
 }
 
+static void spawn_projectile(World& w, const int target_id, const float dmg) {
+    Projectile p{};
+    p.pos = w.champ.pos;
+    p.prev_pos = w.champ.pos;
+    p.target_id = target_id;
+    p.dmg = dmg;
+    w.projectiles.push_back(p);
+}
+
+static void apply_damage(World& w, Dummy& d, const float dmg) {
+    d.hp = fmaxf(0.0f, d.hp - dmg);
+    w.popups.push_back(FloatingText{d.pos, dmg, k_popup_life});
+}
+
 static void step_toward(Champion& c, const Vector2 target, const float dt) {
     c.pos = Vector2MoveTowards(c.pos, target, c.move_speed * dt);
 }
@@ -155,7 +193,7 @@ static void combat_system(World& w, const float dt) {
     if (c.windup > 0.0f) {  // committed; locked in place until the damage point
         c.windup -= dt;
         if (c.windup <= 0.0f) {
-            // Damage point reached. Projectile spawning comes in the next step.
+            spawn_projectile(w, c.target_id, c.atk_damage);  // damage point
         }
         return;
     }
@@ -178,12 +216,41 @@ static void combat_system(World& w, const float dt) {
     }
 }
 
+// Homing projectiles advance toward their target and apply damage on contact.
+static void projectile_system(World& w, const float dt) {
+    for (Projectile& p : w.projectiles) {
+        p.prev_pos = p.pos;
+        Dummy* t = find_dummy(w, p.target_id);
+        if (t == nullptr) {
+            p.live = false;
+            continue;
+        }
+        p.pos = Vector2MoveTowards(p.pos, t->pos, p.speed * dt);
+        if (Vector2Distance(p.pos, t->pos) < k_hit_distance) {
+            apply_damage(w, *t, p.dmg);
+            p.live = false;
+        }
+    }
+    std::erase_if(w.projectiles, [](const Projectile& p) { return !p.live; });
+}
+
+// Floating damage numbers drift up and fade, then get cleaned up.
+static void effects_system(World& w, const float dt) {
+    for (FloatingText& f : w.popups) {
+        f.pos.y -= k_popup_rise * dt;
+        f.life -= dt;
+    }
+    std::erase_if(w.popups, [](const FloatingText& f) { return f.life <= 0.0f; });
+}
+
 static void update(World& w, const Commands& cmds, const float dt) {
     w.champ.prev_pos = w.champ.pos;
 
     apply_commands(w, cmds);
     movement_system(w.champ, dt);
     combat_system(w, dt);
+    projectile_system(w, dt);
+    effects_system(w, dt);
 }
 
 static void draw_grid() {
@@ -277,7 +344,8 @@ static void draw_cursor() {
     DrawLineEx(pts[0], streak_end, 2.5f, accent);
 }
 
-static void render(const World& w, const Vector2 champ_pos, const Camera2D& camera) {
+static void render(const World& w, const Vector2 champ_pos, const float alpha,
+                   const Camera2D& camera) {
     BeginDrawing();
     ClearBackground(Color{18, 18, 22, 255});
 
@@ -308,6 +376,20 @@ static void render(const World& w, const Vector2 champ_pos, const Camera2D& came
         w.champ.windup > 0.0f ? Color{230, 200, 90, 255} : Color{90, 150, 240, 255};
     DrawCircleV(champ_pos, k_champ_radius, champ_fill);
     DrawCircleLinesV(champ_pos, k_champ_radius, Color{200, 220, 255, 255});
+
+    // Projectiles (interpolated for smoothness at high frame rates).
+    for (const Projectile& p : w.projectiles) {
+        const Vector2 pp = Vector2Lerp(p.prev_pos, p.pos, alpha);
+        DrawCircleV(pp, k_projectile_radius, Color{250, 230, 140, 255});
+        DrawCircleLinesV(pp, k_projectile_radius, Color{255, 255, 220, 255});
+    }
+
+    // Floating damage numbers.
+    for (const FloatingText& f : w.popups) {
+        const unsigned char a = static_cast<unsigned char>(Clamp(f.life / k_popup_life, 0.0f, 1.0f) * 255.0f);
+        DrawText(TextFormat("%.0f", static_cast<double>(f.value)), static_cast<int>(f.pos.x) - 14,
+                 static_cast<int>(f.pos.y) - 40, 24, Color{255, 240, 160, a});
+    }
     EndMode2D();
 
     draw_cursor();
@@ -354,7 +436,7 @@ int main() {
         const Vector2 champ_pos = Vector2Lerp(world.champ.prev_pos, world.champ.pos, alpha);
 
         camera.target = champ_pos;
-        render(world, champ_pos, camera);
+        render(world, champ_pos, alpha, camera);
     }
 
     CloseWindow();
