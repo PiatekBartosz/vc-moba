@@ -63,6 +63,23 @@ inline constexpr float k_popup_rise = 70.0f;  // upward drift, units/sec
 inline constexpr float k_dummy_radius = 28.0f;
 inline constexpr float k_dummy_hp = 1000.0f;
 
+// Champion vitals (mana is a placeholder for now).
+inline constexpr float k_champ_hp = 680.0f;
+inline constexpr float k_champ_mana = 320.0f;
+
+// Survival ("Normal") mode -------------------------------------------------
+inline constexpr float k_enemy_radius = 26.0f;
+inline constexpr float k_enemy_height = 64.0f;
+inline constexpr float k_enemy_hp = 110.0f;
+inline constexpr float k_enemy_speed = 155.0f;
+inline constexpr float k_enemy_touch_dps = 24.0f;
+inline constexpr float k_spawn_radius = 1500.0f;       // spawn distance from the champion
+inline constexpr float k_spawn_interval_base = 2.2f;   // seconds between waves at t = 0
+inline constexpr float k_spawn_interval_min = 0.45f;
+inline constexpr float k_kit_interval = 9.0f;          // seconds between health-kit spawns
+inline constexpr float k_kit_heal = 200.0f;
+inline constexpr float k_kit_radius = 28.0f;
+
 // 3D presentation. The sim is flat 2D; world (x, y) maps onto the ground as the 3D
 // (x, 0, y) plane, with the 3D Y axis used for height. A fixed tilted camera follows
 // the champion for a League-style top-down perspective.

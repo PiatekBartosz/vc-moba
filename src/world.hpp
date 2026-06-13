@@ -26,6 +26,11 @@ struct Champion {
     Vector2 prev_pos{0.0f, 0.0f};  // sim position one step ago, for render interpolation
     float move_speed = k_move_speed;
 
+    float hp = k_champ_hp;
+    float max_hp = k_champ_hp;
+    float mana = k_champ_mana;  // placeholder resource for now
+    float max_mana = k_champ_mana;
+
     float attack_range = k_attack_range;
     float attacks_per_sec = k_attacks_per_sec;
     float atk_damage = k_attack_damage;
@@ -67,7 +72,17 @@ struct Dummy {
     float ignite_dps = 0.0f;
     Vector2 knock_vel{0.0f, 0.0f};  // Condemn knockback velocity
     float knock_left = 0.0f;        // knockback time remaining
-    float stun_left = 0.0f;         // stun remaining (cosmetic; dummies don't act)
+    float stun_left = 0.0f;         // stun remaining
+
+    // Survival-mode enemy behaviour (practice dummies leave these at defaults).
+    bool hostile = false;       // chases the champion and deals contact damage
+    float speed = 0.0f;         // enemy move speed
+    float touch_dps = 0.0f;     // contact damage per second to the champion
+};
+
+struct HealthKit {
+    Vector2 pos{0.0f, 0.0f};
+    float heal = k_kit_heal;
 };
 
 struct Projectile {
@@ -91,6 +106,14 @@ struct World {
     std::vector<Projectile> projectiles;
     std::vector<FloatingText> popups;
     std::vector<Rectangle> walls;
+    std::vector<HealthKit> kits;
     bool cooldowns_enabled = true;  // practice toggle (false == abilities always ready)
     int next_id = 0;
+
+    // Survival-mode run state.
+    bool survival = false;
+    float game_time = 0.0f;
+    float spawn_timer = 0.0f;
+    float kit_timer = 0.0f;
+    int kills = 0;
 };

@@ -3,6 +3,7 @@
 #include "raymath.h"
 #include "rlgl.h"
 
+#include "app.hpp"
 #include "config.hpp"
 
 // --- world-space (3D) helpers ------------------------------------------------
@@ -260,6 +261,38 @@ static void draw_dummy_3d(const Dummy& d, const float t) {
     }
 
     rlPopMatrix();
+}
+
+// Survival enemy: a spiky red blob with glowing eyes (bobs as it advances).
+static void draw_enemy_3d(const Dummy& d, const float t) {
+    const float bob = sinf(t * 6.0f + static_cast<float>(d.id)) * 3.0f;
+    const float r = d.radius;
+    const Color body{150, 42, 54, 255};
+    const Color body_dark{96, 24, 34, 255};
+    const Color eye{250, 230, 120, 255};
+
+    rlPushMatrix();
+    rlTranslatef(d.pos.x, bob, d.pos.y);
+    DrawSphere(Vector3{0.0f, r * 1.05f, 0.0f}, r, body);
+    DrawSphereWires(Vector3{0.0f, r * 1.05f, 0.0f}, r, 6, 7, body_dark);
+    for (int i = 0; i < 6; ++i) {
+        const float a = static_cast<float>(i) * (PI / 3.0f);
+        DrawCylinder(Vector3{cosf(a) * r * 0.6f, r * 1.5f, sinf(a) * r * 0.6f}, 0.0f, 4.0f, 14.0f,
+                     5, body_dark);
+    }
+    DrawSphere(Vector3{-7.0f, r * 1.25f, r * 0.82f}, 4.0f, eye);
+    DrawSphere(Vector3{7.0f, r * 1.25f, r * 0.82f}, 4.0f, eye);
+    rlPopMatrix();
+}
+
+// A floating health kit: green crate with a white cross, gently bobbing.
+static void draw_kit(const HealthKit& k, const float t) {
+    const float bob = 16.0f + sinf(t * 3.0f + k.pos.x * 0.01f) * 4.0f;
+    const Vector3 c = to3d(k.pos, bob);
+    DrawCube(c, 24.0f, 24.0f, 24.0f, Color{40, 175, 80, 255});
+    DrawCubeWires(c, 24.0f, 24.0f, 24.0f, Color{20, 110, 50, 255});
+    DrawCube(Vector3{c.x, c.y + 13.0f, c.z}, 18.0f, 4.0f, 6.0f, RAYWHITE);
+    DrawCube(Vector3{c.x, c.y + 13.0f, c.z}, 6.0f, 4.0f, 18.0f, RAYWHITE);
 }
 
 // Vayne-style night hunter, built entirely from primitives: boots, a tailored flared
@@ -551,8 +584,8 @@ static void draw_ability_bar(const World& w) {
     const float size = 64.0f;
     const float gap = 12.0f;
     const float total_w = size * 4.0f + gap * 3.0f;
-    const float x0 = (static_cast<float>(k_window_size_x) - total_w) * 0.5f;
-    const float y = static_cast<float>(k_window_size_y) - size - 28.0f;
+    const float x0 = (static_cast<float>(GetScreenWidth()) - total_w) * 0.5f;
+    const float y = static_cast<float>(GetScreenHeight()) - size - 28.0f;
     const bool practice = !w.cooldowns_enabled;
     const Cooldown passive{};  // Silver Bolts is passive -> always shown ready
 
@@ -569,10 +602,129 @@ static void draw_ability_bar(const World& w) {
     }
 }
 
+static void draw_editor_hud(const AppState& app) {
+    DrawText("MAP CREATOR", 10, 44, 28, Color{120, 220, 140, 255});
+    DrawText("WASD / Arrows: pan camera     Esc: menu", 10, 78, 20, Color{200, 200, 210, 255});
+    const char* tools[3] = {"1: Wall (drag)", "2: Dummy (click)", "3: Erase (click)"};
+    for (int i = 0; i < 3; ++i) {
+        const bool sel = static_cast<int>(app.tool) == i;
+        DrawText(tools[i], 10, 108 + i * 26, 22,
+                 sel ? Color{250, 230, 140, 255} : Color{160, 166, 180, 255});
+    }
+}
+
+static void draw_menu(const AppState& app) {
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{0, 0, 0, 160});
+    const char* title = "PAUSED";
+    DrawText(title, (GetScreenWidth() - MeasureText(title, 56)) / 2, GetScreenHeight() / 2 - 230, 56,
+             RAYWHITE);
+
+    const Vector2 m = GetMousePosition();
+    for (int i = 0; i < k_menu_buttons; ++i) {
+        const Rectangle r = menu_button_rect(i);
+        const bool hover = CheckCollisionPointRec(m, r);
+        DrawRectangleRec(r, hover ? Color{60, 68, 86, 255} : Color{36, 40, 52, 255});
+        DrawRectangleLinesEx(r, 2.0f, hover ? Color{214, 196, 110, 255} : Color{80, 86, 100, 255});
+        const char* lbl = menu_button_label(i);
+        DrawText(lbl, static_cast<int>(r.x) + (static_cast<int>(r.width) - MeasureText(lbl, 28)) / 2,
+                 static_cast<int>(r.y) + (static_cast<int>(r.height) - 28) / 2, 28, RAYWHITE);
+    }
+
+    const char* cur = app.mode == Mode::Editor    ? "Current: Map Creator"
+                      : app.mode == Mode::Practice ? "Current: Practice Tool"
+                                                   : "Current: Normal (Survival)";
+    DrawText(cur, (GetScreenWidth() - MeasureText(cur, 22)) / 2, GetScreenHeight() / 2 + 210, 22,
+             Color{160, 200, 170, 255});
+}
+
+static void draw_vitals(const Champion& c) {
+    const float bw = 470.0f;
+    const float bh = 24.0f;
+    const float x = (static_cast<float>(GetScreenWidth()) - bw) * 0.5f;
+    const float y = 22.0f;
+    const float hp_frac = c.max_hp > 0.0f ? Clamp(c.hp / c.max_hp, 0.0f, 1.0f) : 0.0f;
+    DrawRectangleRec(Rectangle{x - 2.0f, y - 2.0f, bw + 4.0f, bh + 4.0f}, Color{0, 0, 0, 190});
+    DrawRectangleRec(Rectangle{x, y, bw, bh}, Color{60, 20, 20, 255});
+    DrawRectangleRec(Rectangle{x, y, bw * hp_frac, bh}, Color{210, 60, 60, 255});
+    DrawText(TextFormat("%.0f / %.0f", static_cast<double>(c.hp), static_cast<double>(c.max_hp)),
+             static_cast<int>(x) + 8, static_cast<int>(y) + 4, 18, RAYWHITE);
+
+    const float mbh = 16.0f;
+    const float my = y + bh + 6.0f;
+    const float m_frac = c.max_mana > 0.0f ? Clamp(c.mana / c.max_mana, 0.0f, 1.0f) : 0.0f;
+    DrawRectangleRec(Rectangle{x - 2.0f, my - 2.0f, bw + 4.0f, mbh + 4.0f}, Color{0, 0, 0, 190});
+    DrawRectangleRec(Rectangle{x, my, bw, mbh}, Color{22, 30, 66, 255});
+    DrawRectangleRec(Rectangle{x, my, bw * m_frac, mbh}, Color{74, 116, 224, 255});
+    DrawText("MANA", static_cast<int>(x) + 8, static_cast<int>(my) + 1, 13, Color{200, 210, 235, 255});
+}
+
+static void draw_minimap(const World& w, const AppState& app, const Vector2 champ_pos) {
+    const float mm = 280.0f;
+    const float pad = 16.0f;
+    const Rectangle box{static_cast<float>(GetScreenWidth()) - mm - pad,
+                        static_cast<float>(GetScreenHeight()) - mm - pad, mm, mm};
+    const float range = 2000.0f;  // world half-extent shown
+    const auto w2m = [&](const Vector2 p) {
+        return Vector2{box.x + (p.x + range) / (2.0f * range) * mm,
+                       box.y + (p.y + range) / (2.0f * range) * mm};
+    };
+
+    DrawRectangleRec(box, Color{20, 30, 24, 225});
+    DrawRectangleLinesEx(box, 2.0f, Color{90, 100, 90, 255});
+
+    BeginScissorMode(static_cast<int>(box.x), static_cast<int>(box.y), static_cast<int>(mm),
+                     static_cast<int>(mm));
+
+    const float h = 1850.0f;
+    const Vector2 blue{-h, h};
+    const Vector2 red{h, -h};
+    const Vector2 tl{-h, -h};
+    const Vector2 br{h, h};
+    DrawLineEx(w2m(tl), w2m(br), 3.0f, Color{52, 96, 150, 255});            // river
+    const Color lane{150, 130, 86, 255};
+    DrawLineEx(w2m(blue), w2m(red), 3.0f, lane);
+    DrawLineEx(w2m(blue), w2m(tl), 3.0f, lane);
+    DrawLineEx(w2m(tl), w2m(red), 3.0f, lane);
+    DrawLineEx(w2m(blue), w2m(br), 3.0f, lane);
+    DrawLineEx(w2m(br), w2m(red), 3.0f, lane);
+
+    for (const Rectangle& wall : w.walls) {
+        const Vector2 tlp = w2m(Vector2{wall.x, wall.y});
+        DrawRectangleRec(Rectangle{tlp.x, tlp.y, wall.width / (2.0f * range) * mm,
+                                   wall.height / (2.0f * range) * mm},
+                         Color{120, 118, 128, 255});
+    }
+
+    DrawCircleV(w2m(blue), 6.0f, Color{70, 130, 220, 255});
+    DrawCircleV(w2m(red), 6.0f, Color{220, 90, 70, 255});
+
+    for (const HealthKit& k : w.kits) {
+        DrawCircleV(w2m(k.pos), 3.0f, Color{60, 200, 90, 255});
+    }
+    for (const Dummy& d : w.dummies) {
+        DrawCircleV(w2m(d.pos), 3.0f,
+                    d.hostile ? Color{235, 70, 60, 255} : Color{200, 160, 120, 255});
+    }
+
+    // Champion blip.
+    DrawCircleV(w2m(champ_pos), 5.0f, Color{90, 170, 250, 255});
+    DrawCircleLinesV(w2m(champ_pos), 5.0f, RAYWHITE);
+
+    // Camera view rectangle (where you're currently looking).
+    const Vector2 ref = app.mode == Mode::Editor ? app.edit_cam : app.cam;
+    const Vector2 v0 = w2m(Vector2{ref.x - 560.0f, ref.y - 440.0f});
+    const Vector2 v1 = w2m(Vector2{ref.x + 560.0f, ref.y + 440.0f});
+    DrawRectangleLinesEx(Rectangle{v0.x, v0.y, v1.x - v0.x, v1.y - v0.y}, 1.5f,
+                         Color{235, 235, 245, 220});
+
+    EndScissorMode();
+}
+
 // --- frame --------------------------------------------------------------------
 
 void render(const World& w, const Vector2 champ_pos, const float alpha,
-            const bool attack_move_armed, const bool ignite_armed, const Camera3D& camera) {
+            const bool attack_move_armed, const bool ignite_armed, const Camera3D& camera,
+            const AppState& app, const Vector2 cursor_ground) {
     BeginDrawing();
     ClearBackground(Color{14, 15, 20, 255});
 
@@ -583,6 +735,20 @@ void render(const World& w, const Vector2 champ_pos, const float alpha,
 
     for (int i = 0; i < static_cast<int>(w.walls.size()); ++i) {
         draw_wall_rock(w.walls[static_cast<size_t>(i)], i);
+    }
+
+    // Editor: ground cursor marker + live wall-drag preview.
+    if (app.mode == Mode::Editor) {
+        ground_ring(cursor_ground, 28.0f, Color{240, 240, 255, 220});
+        if (app.tool == Tool::Wall && app.dragging) {
+            const float x = fminf(app.drag_start.x, cursor_ground.x);
+            const float z = fminf(app.drag_start.y, cursor_ground.y);
+            const float ww = fabsf(cursor_ground.x - app.drag_start.x);
+            const float hh = fabsf(cursor_ground.y - app.drag_start.y);
+            const Vector3 c{x + ww * 0.5f, k_wall_height * 0.5f, z + hh * 0.5f};
+            DrawCube(c, ww, k_wall_height, hh, Color{120, 160, 220, 120});
+            DrawCubeWires(c, ww, k_wall_height, hh, Color{180, 210, 255, 255});
+        }
     }
 
     // Ground rings: attack range, order markers, target highlight, ghost buff.
@@ -609,8 +775,15 @@ void render(const World& w, const Vector2 champ_pos, const float alpha,
         ground_ring(champ_pos, k_champ_radius + 13.0f, Color{200, 110, 235, 255});
     }
 
+    for (const HealthKit& k : w.kits) {
+        draw_kit(k, t);
+    }
     for (const Dummy& d : w.dummies) {
-        draw_dummy_3d(d, t);
+        if (d.hostile) {
+            draw_enemy_3d(d, t);
+        } else {
+            draw_dummy_3d(d, t);
+        }
         if (d.ignite_left > 0.0f) {  // burning indicator on the ground
             ground_ring(d.pos, d.radius + 6.0f, Color{240, 140, 40, 255});
             ground_ring(d.pos, d.radius + 11.0f, Color{220, 90, 30, 255});
@@ -655,7 +828,8 @@ void render(const World& w, const Vector2 champ_pos, const float alpha,
 
     // Screen-space billboards: HP bars above dummies, floating damage numbers.
     for (const Dummy& d : w.dummies) {
-        const Vector2 sp = GetWorldToScreen(to3d(d.pos, k_dummy_height + 34.0f), camera);
+        const float head = d.hostile ? k_enemy_radius * 2.6f : k_dummy_height + 34.0f;
+        const Vector2 sp = GetWorldToScreen(to3d(d.pos, head), camera);
         draw_health_bar_screen(sp, d.hp, d.max_hp);
     }
     for (const FloatingText& f : w.popups) {
@@ -667,12 +841,27 @@ void render(const World& w, const Vector2 champ_pos, const float alpha,
                  static_cast<int>(sp.y - rise), 24, Color{255, 240, 160, a});
     }
 
-    draw_ability_bar(w);
+    if (app.mode == Mode::Normal) {
+        draw_vitals(w.champ);
+        draw_ability_bar(w);
+        const int secs = static_cast<int>(w.game_time);
+        const char* info = TextFormat("Time %02d:%02d    Kills %d", secs / 60, secs % 60, w.kills);
+        DrawText(info, (GetScreenWidth() - MeasureText(info, 24)) / 2, 70, 24,
+                 Color{230, 230, 210, 255});
+    } else if (app.mode == Mode::Practice) {
+        draw_ability_bar(w);
+        DrawText(
+            "RMB: move/attack  A+LMB: attack-move  Q: tumble  E: condemn  R: ultimate  D: flash  F: ghost  T: dummy  N: no-cd  X: reset  Esc: menu",
+            10, 35, 20, Color{200, 200, 210, 255});
+    } else {
+        draw_editor_hud(app);
+    }
 
     draw_cursor(attack_move_armed, ignite_armed);
     DrawFPS(10, 10);
-    DrawText(
-        "RMB: move/attack  A+LMB: attack-move  Q: tumble  E: condemn  R: ultimate  D: flash  F: ghost  T: dummy  N: no-cd  X: reset",
-        10, 35, 20, Color{200, 200, 210, 255});
+    draw_minimap(w, app, champ_pos);
+    if (app.menu_open) {
+        draw_menu(app);
+    }
     EndDrawing();
 }

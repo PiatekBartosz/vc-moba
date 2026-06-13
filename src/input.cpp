@@ -5,7 +5,7 @@
 #include "systems.hpp"  // dummy_at
 
 // Project the mouse cursor onto the ground plane (y = 0), returning world 2D coords.
-static Vector2 mouse_ground(const Camera3D& camera) {
+Vector2 mouse_ground(const Camera3D& camera) {
     const Ray ray = GetScreenToWorldRay(GetMousePosition(), camera);
     const float t = fabsf(ray.direction.y) > 1e-6f ? -ray.position.y / ray.direction.y : 0.0f;
     const Vector3 hit = Vector3Add(ray.position, Vector3Scale(ray.direction, t));
@@ -36,8 +36,8 @@ void poll_input(const World& w, Commands& cmds, InputState& in, const Camera3D& 
         cmds.attack_move_point = mouse_ground(camera);
         in.attack_move_armed = false;
     }
-    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsKeyPressed(KEY_ESCAPE)) {
-        in.attack_move_armed = false;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        in.attack_move_armed = false;  // Esc is reserved for the pause menu
     }
 
     // Vayne abilities.

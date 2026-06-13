@@ -2,6 +2,7 @@
 
 #include "raymath.h"
 
+#include <cstddef>
 #include <vector>
 
 #include "config.hpp"
@@ -445,16 +446,173 @@ static void effects_system(World& w, const float dt) {
     std::erase_if(w.popups, [](const FloatingText& f) { return f.life <= 0.0f; });
 }
 
+// --- Survival ("Normal") mode -------------------------------------------------
+
+static Dummy* nearest_hostile(World& w, const Vector2 pos, const float range) {
+    Dummy* best = nullptr;
+    float best_dist = range;
+    for (Dummy& d : w.dummies) {
+        if (!d.hostile || d.hp <= 0.0f) {
+            continue;
+        }
+        const float dist = Vector2Distance(pos, d.pos);
+        if (dist <= best_dist) {
+            best_dist = dist;
+            best = &d;
+        }
+    }
+    return best;
+}
+
+// While idle (and not mid-roll/attack), auto-acquire the nearest enemy (VS-style).
+static void auto_engage(World& w) {
+    Champion& c = w.champ;
+    if (c.dash_left > 0.0f || c.windup > 0.0f || c.order != Champion::Order::Idle) {
+        return;
+    }
+    if (Dummy* t = nearest_hostile(w, c.pos, c.attack_range * 1.5f); t != nullptr) {
+        c.order = Champion::Order::AttackTarget;
+        c.target_id = t->id;
+    }
+}
+
+static void spawn_enemy(World& w, const Vector2 pos) {
+    Dummy e{};
+    e.id = w.next_id++;
+    e.pos = pos;
+    e.radius = k_enemy_radius;
+    e.max_hp = k_enemy_hp + w.game_time * 1.6f;  // tougher over time
+    e.hp = e.max_hp;
+    e.hostile = true;
+    e.speed = k_enemy_speed;
+    e.touch_dps = k_enemy_touch_dps;
+    w.dummies.push_back(e);
+}
+
+// Spawn waves of enemies around the champion, ramping in count and rate over time.
+static void spawn_system(World& w, const float dt) {
+    w.game_time += dt;
+    w.spawn_timer -= dt;
+    if (w.spawn_timer > 0.0f) {
+        return;
+    }
+    w.spawn_timer = fmaxf(k_spawn_interval_min, k_spawn_interval_base - w.game_time * 0.02f);
+    const int count = 1 + static_cast<int>(w.game_time / 18.0f);
+    for (int i = 0; i < count; ++i) {
+        const float ang = static_cast<float>(GetRandomValue(0, 359)) * DEG2RAD;
+        spawn_enemy(w, Vector2{w.champ.pos.x + cosf(ang) * k_spawn_radius,
+                               w.champ.pos.y + sinf(ang) * k_spawn_radius});
+    }
+}
+
+// Enemies chase the champion and deal contact damage (knocked/stunned enemies hold).
+static void enemy_system(World& w, const float dt) {
+    Champion& c = w.champ;
+    for (Dummy& d : w.dummies) {
+        if (!d.hostile || d.hp <= 0.0f || d.knock_left > 0.0f || d.stun_left > 0.0f) {
+            continue;
+        }
+        d.pos = Vector2MoveTowards(d.pos, c.pos, d.speed * dt);
+        if (Vector2Distance(d.pos, c.pos) <= d.radius + k_champ_radius) {
+            c.hp -= d.touch_dps * dt;
+        }
+    }
+    if (c.hp < 0.0f) {
+        c.hp = 0.0f;
+    }
+}
+
+// Periodically drop health kits; picking one up heals the champion.
+static void kit_system(World& w, const float dt) {
+    w.kit_timer -= dt;
+    if (w.kit_timer <= 0.0f) {
+        w.kit_timer = k_kit_interval;
+        const float ang = static_cast<float>(GetRandomValue(0, 359)) * DEG2RAD;
+        const float r = static_cast<float>(GetRandomValue(300, 900));
+        w.kits.push_back(HealthKit{
+            Vector2{w.champ.pos.x + cosf(ang) * r, w.champ.pos.y + sinf(ang) * r}, k_kit_heal});
+    }
+    for (std::size_t i = 0; i < w.kits.size();) {
+        if (Vector2Distance(w.champ.pos, w.kits[i].pos) <= k_kit_radius + k_champ_radius) {
+            w.champ.hp = fminf(w.champ.max_hp, w.champ.hp + w.kits[i].heal);
+            w.kits.erase(w.kits.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+
+void start_survival(World& w) {
+    std::erase_if(w.dummies, [](const Dummy& d) { return d.hostile; });
+    w.kits.clear();
+    w.projectiles.clear();
+    w.popups.clear();
+    w.game_time = 0.0f;
+    w.spawn_timer = 0.0f;
+    w.kit_timer = k_kit_interval;
+    w.kills = 0;
+
+    Champion& c = w.champ;
+    c.pos = Vector2{0.0f, 0.0f};
+    c.prev_pos = c.pos;
+    c.hp = c.max_hp;
+    c.mana = c.max_mana;
+    c.order = Champion::Order::Idle;
+    c.target_id = -1;
+    c.windup = 0.0f;
+    c.atk_cooldown = 0.0f;
+    c.dash_left = 0.0f;
+    c.ghost_buff = 0.0f;
+    c.ult_left = 0.0f;
+    c.stealth_left = 0.0f;
+    c.q_empowered = false;
+    c.sb_stacks = 0;
+    c.sb_target_id = -1;
+    c.sb_timer = 0.0f;
+}
+
+void start_practice(World& w) {
+    std::erase_if(w.dummies, [](const Dummy& d) { return d.hostile; });
+    w.kits.clear();
+    w.champ.hp = w.champ.max_hp;
+    w.champ.mana = w.champ.max_mana;
+}
+
+// Remove dead enemies (counting kills); restart the run if the champion dies.
+static void survival_cleanup(World& w) {
+    std::erase_if(w.dummies, [&w](const Dummy& d) {
+        if (d.hostile && d.hp <= 0.0f) {
+            w.kills += 1;
+            return true;
+        }
+        return false;
+    });
+    if (w.champ.hp <= 0.0f) {
+        start_survival(w);  // died -> restart the survival run
+    }
+}
+
 void update(World& w, const Commands& cmds, const float dt) {
     w.champ.prev_pos = w.champ.pos;
 
     apply_commands(w, cmds);
     abilities_system(w, cmds, dt);
+    if (w.survival) {
+        auto_engage(w);
+    }
     dash_system(w.champ, dt);
     movement_system(w.champ, dt);
     combat_system(w, dt);
     collision_system(w);
     knockback_system(w, dt);
+    if (w.survival) {
+        spawn_system(w, dt);
+        enemy_system(w, dt);
+        kit_system(w, dt);
+    }
     projectile_system(w, dt);
     effects_system(w, dt);
+    if (w.survival) {
+        survival_cleanup(w);
+    }
 }
